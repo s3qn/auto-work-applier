@@ -42,7 +42,10 @@ CREATE TABLE IF NOT EXISTS applications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id INTEGER NOT NULL REFERENCES jobs(id),
     channel TEXT NOT NULL
-        CHECK (channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')),
+        CHECK (
+            channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')
+            OR channel LIKE 'generic:%'
+        ),
     applied_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'sent'
         CHECK (status IN (
@@ -157,12 +160,13 @@ def _table_sql(conn: sqlite3.Connection, table: str) -> str:
 
 def _rebuild_applications_table(conn: sqlite3.Connection) -> None:
     """Recreate `applications` with the current CHECK constraints (new
-    channel and status values), preserving every row. SQLite can't ALTER a
+    channel and status values, and the `generic:<domain>` channel the
+    generic apply handler uses), preserving every row. SQLite can't ALTER a
     CHECK constraint in place, so this is the standard SQLite migration
     dance: rename, recreate from SCHEMA, copy, drop. Guarded by a check of
     the live constraint text so it only ever runs once."""
     sql = _table_sql(conn, "applications")
-    if "ready_to_submit" in sql and "'lever'" in sql:
+    if "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql:
         return
     conn.execute("ALTER TABLE applications RENAME TO applications_old")
     conn.execute(
@@ -171,7 +175,10 @@ def _rebuild_applications_table(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id INTEGER NOT NULL REFERENCES jobs(id),
             channel TEXT NOT NULL
-                CHECK (channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')),
+                CHECK (
+                    channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')
+                    OR channel LIKE 'generic:%'
+                ),
             applied_at TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'sent'
                 CHECK (status IN (

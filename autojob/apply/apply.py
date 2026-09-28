@@ -8,11 +8,18 @@ and leaves the application as `ready_to_submit`; `release_application` is
 what a later "Release" click from the dashboard uses to go back and
 actually submit that same, already-filled application.
 
-Company-site crawling to find an application link is intentionally not
-built yet: `_resolve_apply_url` uses `companies.careers_url` from research
-when present, otherwise the job's own URL, exactly as scoped. Anything that
-isn't Greenhouse, Lever, or Comeet becomes a `needs_help` item rather than a
-guess.
+`_resolve_apply_url` uses `companies.careers_url` from research when
+present, otherwise the job's own URL. Greenhouse, Lever and Comeet get their
+deterministic handlers; every other ATS (a company career page, AllJobs,
+LinkedIn) goes through `handlers/generic.py`, the browser-plus-LLM fallback,
+rather than escalating to `needs_help` without an attempt.
+
+`requeue_stale_no_handler_jobs` is a one-time maintenance function: before
+the generic handler existed, any job on an unrecognized ATS was escalated
+without being attempted, tagged with the reason
+"No apply handler recognizes this ATS...". It resets those jobs to `queued`
+and deletes the now-stale help items, so the next apply pass gives them the
+attempt they never got.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from autojob.pipeline import events
 from autojob.web.deps import get_answer_bank, get_profile_answers
 
 CHANNEL_BY_HANDLER_NAME = {"greenhouse": "greenhouse", "lever": "lever", "comeet": "comeet"}
+STALE_NO_HANDLER_REASON_MARKER = "No apply handler recognizes this ATS"
 
 
 def _row_get(row, key: str, default=None):
@@ -54,8 +62,13 @@ def _job_facts(job) -> dict:
     }
 
 
-def _handler_channel(handler) -> str:
+def _handler_channel(handler, url: str = "") -> str:
     name = handler.__name__.rsplit(".", 1)[-1]
+    if name == "generic":
+        from urllib.parse import urlparse
+
+        domain = urlparse(url or "").netloc.lower() or "unknown"
+        return f"generic:{domain}"
     return CHANNEL_BY_HANDLER_NAME.get(name, "other")
 
 
@@ -116,7 +129,7 @@ def _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit: bo
             events.emit(conn, run_id, "apply", "info", f"apply: {title} @ {company}: no ATS handler, needs help.")
         return {"status": "needs_help", "application_id": None, "reason": reason}
 
-    channel = _handler_channel(handler)
+    channel = _handler_channel(handler, apply_url)
     if run_id is not None:
         events.emit(conn, run_id, "apply", "info", f"apply: {title} @ {company} via {channel}: filling.")
 
@@ -125,12 +138,18 @@ def _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit: bo
     merged_answers = answers_module.build_answer_set(profile_answers, answer_bank)
 
     company_tldr = _row_get(job, "company_tldr", "")
+    job_facts = _job_facts(job)
     work_dir = config.data_dir / "llm-work"
     content = answers_module.generate_application_content(
-        profile_answers, answer_bank, _job_facts(job), company_tldr, work_dir=work_dir
+        profile_answers, answer_bank, job_facts, company_tldr, work_dir=work_dir
     )
     merged_answers["cover_letter"] = content["cover_letter"]
     merged_answers.update(content["screening_answers"])
+    # Job context for the generic handler's own LLM call (field mapping):
+    # the ATS-specific handlers simply ignore these extra keys.
+    merged_answers["_job_title"] = job_facts["title"]
+    merged_answers["_company_name"] = job_facts["company"]
+    merged_answers["_company_tldr"] = company_tldr or ""
 
     cv_path = latest_cv_pdf(config)
     application_id = db.create_application(
@@ -225,6 +244,9 @@ def release_application(application_id: int) -> dict:
                 merged_answers["cover_letter_file"] = str(
                     proof.save_cover_letter(config, application_id, merged_answers["cover_letter"])
                 )
+                merged_answers["_job_title"] = job["title"]
+                merged_answers["_company_name"] = _row_get(job, "company_name", "") or ""
+                merged_answers["_company_tldr"] = _row_get(job, "company_tldr", "") or ""
                 cv_path = application["cv_path"]
 
                 result = handler.apply(page, merged_answers, cv_path, auto_submit=True)
@@ -251,3 +273,38 @@ def release_application(application_id: int) -> dict:
             return {"status": "failed", "reason": reason}
     finally:
         conn.close()
+
+
+def requeue_stale_no_handler_jobs(conn) -> int:
+    """One-time maintenance: before `handlers/generic.py` existed, any job
+    on an ATS none of the deterministic handlers recognized was escalated to
+    `needs_help` with reason "No apply handler recognizes this ATS..."
+    without ever being attempted. Now that the generic handler covers
+    everything the router doesn't have a specific handler for, this resets
+    those jobs to `queued` (so the next apply pass actually tries them) and
+    deletes the now-stale help items.
+
+    Idempotent: matches only that exact reason on a job still `needs_help`,
+    so calling it again finds nothing left to do, and it never touches a
+    help item that reflects a real outcome (a CAPTCHA, a login requirement,
+    an unanswerable question). Does not run the apply pipeline itself:
+    `auto_submit` still gates whether anything gets sent.
+
+    Returns the number of jobs re-queued.
+    """
+    rows = conn.execute(
+        """
+        SELECT help_items.id AS help_item_id, jobs.id AS job_id
+        FROM help_items
+        JOIN jobs ON jobs.id = help_items.job_id
+        WHERE help_items.resolved_at IS NULL
+          AND jobs.status = 'needs_help'
+          AND help_items.reason LIKE ?
+        """,
+        (f"%{STALE_NO_HANDLER_REASON_MARKER}%",),
+    ).fetchall()
+    for row in rows:
+        conn.execute("DELETE FROM help_items WHERE id = ?", (row["help_item_id"],))
+        conn.execute("UPDATE jobs SET status = 'queued' WHERE id = ?", (row["job_id"],))
+    conn.commit()
+    return len(rows)

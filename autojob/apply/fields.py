@@ -32,10 +32,11 @@ def _norm(label: str) -> str:
 def is_required_label(label: str) -> bool:
     """Greenhouse marks a required field with a trailing "*"; Lever with a
     "required" class and a "&#10038;" glyph rendered as text. Check for
-    both rather than relying on the HTML5 `required` attribute, which these
+    both, and for the Hebrew "חובה" (mandatory) some company career pages
+    use, rather than relying on the HTML5 `required` attribute, which these
     ATSes don't consistently set on their own custom question inputs."""
     text = label or ""
-    return "*" in text or "✱" in text or "required" in text.lower()
+    return "*" in text or "✱" in text or "required" in text.lower() or "חובה" in text
 
 
 def match_answer(label: str, answers: dict) -> str | None:

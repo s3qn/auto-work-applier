@@ -89,10 +89,12 @@ application:
   from research when present, otherwise the job's own URL): Greenhouse
   (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever
   (`jobs.lever.co`), or Comeet (`comeet.com`, or embedded on a company's own
-  domain, detected by the `comeet.co` iframe it injects). Anything else
-  becomes a `needs_help` item rather than a guess: email applications,
-  Google Forms, Workday, and a generic LLM-driven filler for unknown ATS
-  forms are deliberately left for a later build.
+  domain, detected by the `comeet.co` iframe it injects). `pick_handler`
+  never returns `None`: anything none of those three recognize falls back to
+  `handlers/generic.py` rather than escalating to `needs_help` without an
+  attempt. `pick_handler_by_url` stays the narrower "is this a known ATS"
+  check (used by `pick_handler` and by the generic handler itself, to notice
+  when following a redirect landed on a domain a specific handler covers).
 - `handlers/greenhouse.py`, `handlers/lever.py`, `handlers/comeet.py`: each
   exposes `matches(url)` and `apply(page, answers, cv_path, auto_submit)`,
   built and confirmed against real live postings on 2026-09-28 (see each
@@ -100,7 +102,56 @@ application:
   field's label to an honest answer; a label it doesn't recognize (a
   tool-specific proficiency question, a yes/no eligibility question) is left
   unmapped, and a required one it can't answer escalates to `needs_help`
-  instead of guessing.
+  instead of guessing. `is_required_label` also recognizes the Hebrew
+  "חובה" (mandatory) some company career pages use.
+- `handlers/generic.py` is the fallback for every job on an ATS this build
+  has no dedicated handler for: company career pages (Cato Networks, Akamai,
+  Top Soft, Malam, Matrix, lema.ai, Snatch-Up and others), AllJobs'
+  logged-in "send CV" flow (`alljobs.co.il/Search/UploadSingle.aspx`), and
+  LinkedIn `/jobs/view` listings. Same 4-argument contract as the
+  ATS-specific handlers, so `apply.py`'s screenshot capture, help item
+  creation, and status update work unchanged for it too. It:
+  1. Detects an apply affordance (a button or link whose text or aria-label
+     matches "Apply", "Apply now", "Submit application", or Hebrew phrases
+     like "הגש מועמדות" or "שלח קורות חיים") and clicks it if the current
+     page looks like a listing rather than a form, following it to the same
+     page, a modal, an injected iframe, or a new tab.
+  2. If clicking the affordance (or the AllJobs/LinkedIn URL itself) lands
+     on a domain Greenhouse, Lever, or Comeet already covers, hands off to
+     that handler instead of harvesting generically.
+  3. Otherwise harvests every visible input, textarea, select, and
+     radio/checkbox group with its label (`<label for=>`, `aria-label`,
+     `placeholder`, or the nearest wrapping `<label>`), and sends that field
+     list plus Sean's honest answer set (never the CV's inflated wording)
+     and the job/company context to `claude -p --model sonnet` (throwaway
+     cwd, same rule as the rest of the claude CLI usage) to map each field
+     to a value, a skip, or an escalation. A broken claude CLI call falls
+     back to the same conservative `fields.match_answer` mapper the
+     ATS-specific handlers use, so a bad LLM call never blocks the fill.
+  4. Fills what it can, uploads the newest CV PDF into a file input (or the
+     generated cover letter, for one whose label mentions a cover letter),
+     and, if anything escalated, returns `needs_help` with the specific
+     questions while everything else stays filled in.
+  5. Returns specific `needs_help` reasons for the failure modes an
+     LLM-driven flow actually hits, never a blanket "no handler": "CAPTCHA
+     on form" (a `recaptcha`/`hcaptcha`/`captcha`/`turnstile` iframe or
+     element), "Account signup required before applying" (two visible
+     password fields), "AllJobs login required" / "LinkedIn login required"
+     (a visible sign-in affordance on the persistent browser profile), or
+     "Could not locate an application form on this page."
+  LinkedIn gets its own path inside the same module: Easy Apply is walked
+  step by step (harvest, map, fill, click Next/Review, repeat, capped at 8
+  steps), an external apply link is followed and re-detected the same way
+  as a company career page, and either path escalates "LinkedIn login
+  required" up front if the persistent profile has no session.
+- `apply.py`'s `requeue_stale_no_handler_jobs(conn)` is a one-time,
+  idempotent maintenance function: before `handlers/generic.py` existed, a
+  job on an unrecognized ATS was escalated to `needs_help` with reason "No
+  apply handler recognizes this ATS..." without ever being attempted. It
+  resets those jobs (and only those, matched on that exact reason) back to
+  `queued` and deletes the now-stale help items, so the next apply pass
+  gives them the attempt they never got. It does not run the apply pipeline
+  itself: `auto_submit` still gates whether anything actually gets sent.
 - `answers.py` builds the answer set: profile facts from settings key
   `profile.answers`, the reusable `answer_bank` setting for recurring
   questions (years of experience, visa sponsorship, relocation, salary),
@@ -120,7 +171,10 @@ application:
 - `apply.py` (`apply_to_job(job, *, auto_submit)`) ties it together, and
   `release_application(application_id)` is what a "Release" click on the
   dashboard uses to go back and actually submit an already-filled
-  `ready_to_submit` application.
+  `ready_to_submit` application. An application filled by the generic
+  handler records its `channel` as `generic:<domain>` (e.g.
+  `generic:catonetworks.com`), not one of the fixed ATS names; the
+  `applications.channel` CHECK constraint allows both.
 
 **Safety default: `auto_submit` (settings key, default `false`).** When
 off, a handler fills the whole form, takes its screenshot, and stops before

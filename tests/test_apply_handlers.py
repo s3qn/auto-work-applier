@@ -5,7 +5,7 @@ when auto_submit is false."""
 
 from __future__ import annotations
 
-from autojob.apply.handlers import comeet, greenhouse, lever
+from autojob.apply.handlers import comeet, generic, greenhouse, lever
 from autojob.apply.router import pick_handler, pick_handler_by_url
 
 
@@ -372,13 +372,23 @@ def test_router_returns_none_for_unknown_ats():
     assert pick_handler_by_url("https://www.linkedin.com/jobs/view/12345") is None
 
 
+def test_router_falls_back_to_generic_for_unknown_domain_with_no_page():
+    # No live page to inspect (e.g. picking a handler before navigating):
+    # still gets the generic fallback rather than None, and greenhouse/lever/
+    # comeet keep going to their own specific handlers.
+    assert pick_handler("https://careers.example.com/openings/pentester") is generic
+    assert pick_handler("https://job-boards.greenhouse.io/acme/jobs/1") is greenhouse
+    assert pick_handler("https://jobs.lever.co/acme/xyz") is lever
+    assert pick_handler("https://www.comeet.com/jobs/acme/D5/pentester/1A") is comeet
+
+
 def test_router_falls_back_to_page_content_for_embedded_comeet():
     page = FakeComeetPage(frame=FakeComeetFrame(url="https://www.comeet.co/jobs/D5/1A/apply?token=x"))
     handler = pick_handler("https://careers.example.com/openings/pentester", page=page)
     assert handler is comeet
 
 
-def test_router_returns_none_when_page_has_no_comeet_widget_either():
+def test_router_falls_back_to_generic_when_page_has_no_comeet_widget_either():
     page = FakeComeetPage(frame=None)
     handler = pick_handler("https://careers.example.com/openings/pentester", page=page)
-    assert handler is None
+    assert handler is generic
