@@ -82,9 +82,10 @@ def test_run_claude_raises_on_nonzero_exit(monkeypatch, tmp_path):
 # --- filter_jobs --------------------------------------------------------
 
 def test_filter_jobs_maps_keep_and_drop(monkeypatch, tmp_path):
+    # Both titles pass the deterministic title screen, so both reach the LLM.
     jobs = [
         {"title": "Penetration Tester", "company": "A", "location": "Israel", "description": "pentest"},
-        {"title": "Senior Manager", "company": "B", "location": "Israel", "description": "manage"},
+        {"title": "Security Researcher", "company": "B", "location": "Israel", "description": "research"},
     ]
     response = [
         {"fit_score": 8, "keep": True, "reason": "good fit"},
@@ -94,6 +95,28 @@ def test_filter_jobs_maps_keep_and_drop(monkeypatch, tmp_path):
     results = llm_filter.filter_jobs(jobs, "Sean's CV text", work_dir=tmp_path)
     assert results[0] == {"status": "queued", "fit_score": 8.0, "reason": "good fit"}
     assert results[1] == {"status": "filtered_out", "fit_score": 2.0, "reason": "too senior"}
+
+
+def test_filter_jobs_title_screen_drops_before_llm(monkeypatch, tmp_path):
+    # A lawyer and a CTO must be dropped by the title screen without any CLI call,
+    # while the real security role in the same batch is still scored by the LLM.
+    calls = {"n": 0}
+
+    def counting_run(prompt, **kwargs):
+        calls["n"] += 1
+        return json.dumps([{"fit_score": 9, "keep": True, "reason": "strong"}])
+
+    monkeypatch.setattr(llm_filter, "run_claude", counting_run)
+    jobs = [
+        {"title": "Corporate Lawyer", "company": "A", "location": "Israel", "description": ""},
+        {"title": "CTO", "company": "B", "location": "Israel", "description": ""},
+        {"title": "Junior Penetration Tester", "company": "C", "location": "Israel", "description": ""},
+    ]
+    results = llm_filter.filter_jobs(jobs, "cv", work_dir=tmp_path)
+    assert results[0]["status"] == "filtered_out" and "title screen" in results[0]["reason"]
+    assert results[1]["status"] == "filtered_out" and "title screen" in results[1]["reason"]
+    assert results[2] == {"status": "queued", "fit_score": 9.0, "reason": "strong"}
+    assert calls["n"] == 1  # only the one non-blocked job reached the LLM
 
 
 def test_filter_jobs_marks_new_with_reason_on_cli_failure(monkeypatch, tmp_path):
