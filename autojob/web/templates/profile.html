@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Profile and CV - auto-job{% endblock %}
+{% block content %}
+<h1>Profile and CV</h1>
+
+<div class="card">
+  <h2>CV files</h2>
+  {% if cv_files %}
+  <ul class="file-list">
+    {% for f in cv_files %}
+    <li>
+      {{ f }}
+      <form method="post" action="/profile/cv/delete" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="filename" value="{{ f }}">
+        <button type="submit" class="link-button">Delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">No CV uploaded yet.</p>
+  {% endif %}
+  <form method="post" action="/profile/cv" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="cv_file">Upload a CV (PDF or DOCX, up to 10 MB)</label>
+    <input type="file" id="cv_file" name="cv_file" accept=".pdf,.docx" required>
+    <button type="submit">Upload CV</button>
+  </form>
+  {% if cv_error %}<p class="form-error">{{ cv_error }}</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Answers</h2>
+  <form method="post" action="/profile/answers">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label for="full_name">Full name</label>
+    <input type="text" id="full_name" name="full_name" value="{{ answers.full_name }}">
+
+    <label for="email">Email</label>
+    <input type="email" id="email" name="email" value="{{ answers.email }}">
+
+    <label for="phone">Phone</label>
+    <input type="text" id="phone" name="phone" value="{{ answers.phone }}">
+
+    <label for="city">City</label>
+    <input type="text" id="city" name="city" value="{{ answers.city }}">
+
+    <label for="date_of_birth">Date of birth (optional)</label>
+    <input type="date" id="date_of_birth" name="date_of_birth" value="{{ answers.date_of_birth }}">
+
+    <label for="military_service">Military service</label>
+    <input type="text" id="military_service" name="military_service" value="{{ answers.military_service }}">
+
+    <label for="driving_licence">Driving licence</label>
+    <input type="text" id="driving_licence" name="driving_licence" value="{{ answers.driving_licence }}">
+
+    <label for="salary_expectation">Salary expectation</label>
+    <input type="text" id="salary_expectation" name="salary_expectation" value="{{ answers.salary_expectation }}">
+
+    <label for="availability_notice">Availability and notice period</label>
+    <input type="text" id="availability_notice" name="availability_notice" value="{{ answers.availability_notice }}">
+
+    <label for="willing_to_relocate">Willing to relocate</label>
+    <input type="text" id="willing_to_relocate" name="willing_to_relocate" value="{{ answers.willing_to_relocate }}">
+
+    <label for="work_mode_preference">Work mode preference</label>
+    <input type="text" id="work_mode_preference" name="work_mode_preference" value="{{ answers.work_mode_preference }}">
+
+    <label for="linkedin_url">LinkedIn URL</label>
+    <input type="url" id="linkedin_url" name="linkedin_url" value="{{ answers.linkedin_url }}">
+
+    <label for="github_url">GitHub URL</label>
+    <input type="url" id="github_url" name="github_url" value="{{ answers.github_url }}">
+
+    <label for="htb_profile_url">HTB profile URL</label>
+    <input type="url" id="htb_profile_url" name="htb_profile_url" value="{{ answers.htb_profile_url }}">
+
+    <label for="certifications">Certifications</label>
+    <input type="text" id="certifications" name="certifications" value="{{ answers.certifications }}">
+
+    <label for="languages">Languages</label>
+    <input type="text" id="languages" name="languages" value="{{ answers.languages }}">
+
+    <label for="about_me">About me</label>
+    <textarea id="about_me" name="about_me" rows="4">{{ answers.about_me }}</textarea>
+
+    <button type="submit">Save answers</button>
+  </form>
+</div>
+{% endblock %}

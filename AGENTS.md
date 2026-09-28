@@ -1,10 +1,27 @@
 # Stack
 
-Not chosen yet. Research in progress (Python + Playwright on a dedicated Chrome
-profile is the leading option). Fill this in, with the test command, once the
-stack is decided; the agents in `.claude/agents/` and the feature-dev scripts
-still describe the shadowing-app stack (Expo client, FastAPI backend on :8020,
-phone QR tunnel) and need adapting to match.
+Python 3.12, managed with uv (`~/.local/bin/uv`, `pyproject.toml`). FastAPI +
+uvicorn for the web app, Jinja2 server-rendered templates with htmx (vendored
+into `autojob/web/static/`, never loaded from a CDN), SQLite through the
+stdlib `sqlite3` module, argon2-cffi for the password hash, Starlette
+`SessionMiddleware` for sessions.
+
+Commands:
+- `~/.local/bin/uv sync` installs dependencies.
+- `./run.sh` starts the dashboard on `127.0.0.1:8040`. Never bind `0.0.0.0`:
+  this machine has a public IP, and the dashboard reaches the outside world
+  only through the Cloudflare tunnel at https://autojob.sean.build.
+- `./run-tests.sh` runs the pytest suite.
+- `uv run python -m autojob.set_password` sets the single login password.
+
+Data lives under `AUTOJOB_DATA_DIR` (default `<repo>/data`, gitignored):
+the SQLite database, `auth.json`, the session `secret_key`, and uploaded CV
+files under `data/cv/`. Tests always point `AUTOJOB_DATA_DIR` at a temp
+directory and never touch the real one.
+
+The agents in `.claude/agents/` and the feature-dev scripts still describe
+the shadowing-app stack (Expo client, FastAPI backend on :8020, phone QR
+tunnel) and need adapting to match auto-job.
 
 # Writing style
 

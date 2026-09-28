@@ -1,0 +1,13 @@
+[Unit]
+Description=auto-job dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/ai-projects/auto-job
+ExecStart=%h/ai-projects/auto-job/run.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

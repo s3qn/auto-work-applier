@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Needs help - auto-job{% endblock %}
+{% block content %}
+<h1>Needs help</h1>
+{% if items %}
+{% for item in items %}
+<div class="card help-item">
+  <h2>{{ item.job_title }}</h2>
+  <p class="secondary">{{ item.company_name or "Unknown company" }} &middot; <a href="{{ item.job_url }}" target="_blank" rel="noopener">Job link</a></p>
+  <p>{{ item.reason }}</p>
+  <div class="help-actions">
+    <form method="post" action="/help/{{ item.id }}/resolve">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">I did it myself</button>
+    </form>
+    <form method="post" action="/help/{{ item.id }}/skip">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Skip</button>
+    </form>
+    <form method="post" action="/help/{{ item.id }}/answer" class="answer-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <textarea name="answer" rows="2" placeholder="Type an answer"></textarea>
+      <button type="submit">Answer and retry</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% else %}
+<p class="empty-state">Nothing needs your attention right now.</p>
+{% endif %}
+{% endblock %}

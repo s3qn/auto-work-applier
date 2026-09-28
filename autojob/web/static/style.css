@@ -1,0 +1,475 @@
+:root {
+  --bg-sidebar: #1B1D22;
+  --sidebar-text: #C9C6BF;
+  --sidebar-active-bg: #2C2F36;
+  --content-bg: #F7F6F3;
+  --text: #1B1D22;
+  --text-secondary: #5C5F66;
+  --card-bg: #FFFFFF;
+  --card-border: #E7E4DD;
+  --accent: #F59E0B;
+  --link: #A14A08;
+  --chip-sent-bg: #F1EFEA;
+  --chip-sent-text: #33363C;
+  --chip-replied-bg: #E6EEFB;
+  --chip-replied-text: #1E4A8C;
+  --chip-interview-bg: #E1F3E6;
+  --chip-interview-text: #1A6634;
+  --chip-rejected-bg: #F8E7E4;
+  --chip-rejected-text: #8C2B20;
+  --chip-not-interested-bg: #ECEAE4;
+  --chip-not-interested-text: #5C5F66;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  font-family: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--content-bg);
+  color: var(--text);
+}
+
+a {
+  color: var(--link);
+}
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--bg-sidebar);
+  color: var(--sidebar-text);
+  display: flex;
+  flex-direction: column;
+  padding: 24px 16px;
+}
+
+.brand-full {
+  color: #FFFFFF;
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+
+.nav-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  flex-grow: 1;
+}
+
+.nav-list li {
+  margin-bottom: 4px;
+}
+
+.nav-list a {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--sidebar-text);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.nav-list a.active,
+.nav-list a:hover {
+  background: var(--sidebar-active-bg);
+  color: #FFFFFF;
+}
+
+.badge {
+  background: var(--accent);
+  color: #1B1D22;
+  border-radius: 10px;
+  padding: 1px 7px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.sidebar-bottom {
+  border-top: 1px solid #2C2F36;
+  padding-top: 16px;
+}
+
+.next-scan {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.sidebar-bottom form {
+  margin: 0 0 8px;
+}
+
+.run-now-button {
+  width: 100%;
+  background: var(--accent);
+  color: #1B1D22;
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  font-weight: 600;
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  margin: 0;
+}
+
+.logout-button {
+  width: 100%;
+  background: transparent;
+  color: var(--sidebar-text);
+  border: 1px solid #3A3D45;
+  border-radius: 8px;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  margin: 0;
+}
+
+.content {
+  flex-grow: 1;
+  padding: 32px;
+  min-width: 0;
+}
+
+h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 20px;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.secondary {
+  color: var(--text-secondary);
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.stat-tile {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.stat-value {
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.stat-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--card-border);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+th {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+tr:hover td {
+  background: #F1EFEA;
+}
+
+.row-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.row-link:hover {
+  text-decoration: underline;
+}
+
+.chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chip-sent { background: var(--chip-sent-bg); color: var(--chip-sent-text); }
+.chip-replied { background: var(--chip-replied-bg); color: var(--chip-replied-text); }
+.chip-interview { background: var(--chip-interview-bg); color: var(--chip-interview-text); }
+.chip-rejected { background: var(--chip-rejected-bg); color: var(--chip-rejected-text); }
+.chip-not_interested { background: var(--chip-not-interested-bg); color: var(--chip-not-interested-text); }
+
+.empty-state {
+  color: var(--text-secondary);
+}
+
+label {
+  display: block;
+  margin: 12px 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+input[type=text],
+input[type=url],
+input[type=email],
+input[type=number],
+input[type=password],
+input[type=date],
+input[type=file],
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 14px;
+  background: #FFFFFF;
+  color: var(--text);
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: #FFFFFF;
+  color: var(--text);
+  padding: 8px 14px;
+  cursor: pointer;
+  margin-top: 12px;
+}
+
+button:hover {
+  background: #F1EFEA;
+}
+
+form button[type=submit] {
+  background: var(--accent);
+  color: #1B1D22;
+  border: none;
+  font-weight: 600;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  color: var(--link);
+  padding: 0;
+  margin: 0;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.inline-form {
+  display: inline;
+}
+
+.status-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-buttons form {
+  margin: 0;
+}
+
+.status-buttons button {
+  margin: 0;
+}
+
+.status-btn-active {
+  outline: 2px solid var(--accent);
+}
+
+.help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+  margin-top: 12px;
+}
+
+.help-actions form {
+  margin: 0;
+}
+
+.answer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.run-log {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.file-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.file-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--card-border);
+  font-size: 14px;
+}
+
+.form-error {
+  color: #8C2B20;
+  margin-top: 8px;
+}
+
+.saved-indicator {
+  color: #1A6634;
+  margin-left: 12px;
+  font-size: 13px;
+}
+
+/* Login page */
+
+.login-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--content-bg);
+  font-family: "Outfit", sans-serif;
+}
+
+.login-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 32px;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+}
+
+.login-card .brand {
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+/* Mobile: sidebar collapses to a top bar under a menu button */
+
+.sidebar-toggle-input {
+  display: none;
+}
+
+.topbar {
+  display: none;
+}
+
+@media (max-width: 800px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--bg-sidebar);
+    color: #FFFFFF;
+    padding: 14px 16px;
+  }
+
+  .topbar .brand {
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  .menu-button {
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  .sidebar {
+    display: none;
+    width: 100%;
+  }
+
+  .sidebar-toggle-input:checked ~ .app-shell .sidebar {
+    display: flex;
+  }
+
+  .content {
+    padding: 16px;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

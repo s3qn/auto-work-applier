@@ -1,0 +1,7 @@
+[Unit]
+Description=auto-job scan run
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/ai-projects/auto-job
+ExecStart=%h/.local/bin/uv run python -m autojob.pipeline.run

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Submit a link - auto-job{% endblock %}
+{% block content %}
+<h1>Submit a link</h1>
+<div class="card">
+  <form method="post" action="/submit">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="url">Job posting URL</label>
+    <input type="url" id="url" name="url" placeholder="https://..." required>
+    <button type="submit">Add to queue</button>
+  </form>
+  {% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+</div>
+<h2>Recent submissions</h2>
+<div class="card table-card">
+  {% if recent %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>URL</th><th>Found</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for job in recent %}
+      <tr>
+        <td><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.url }}</a></td>
+        <td>{{ job.found_at }}</td>
+        <td>{{ job.status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No manual submissions yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

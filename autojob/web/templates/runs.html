@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Run log - auto-job{% endblock %}
+{% block content %}
+<h1>Run log</h1>
+<div class="card table-card">
+  {% if runs %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Started</th><th>Trigger</th><th>Found</th><th>Filtered</th><th>Applied</th><th>Failed</th><th>Finished</th></tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a href="/runs/{{ run.id }}">{{ run.started_at }}</a></td>
+        <td>{{ run.trigger }}</td>
+        <td>{{ run.found }}</td>
+        <td>{{ run.filtered }}</td>
+        <td>{{ run.applied }}</td>
+        <td>{{ run.failed }}</td>
+        <td>{{ run.finished_at or "in progress" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No runs yet. Use "Run now" or wait for the next scheduled scan.</p>
+  {% endif %}
+</div>
+{% endblock %}

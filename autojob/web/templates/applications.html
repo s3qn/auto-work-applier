@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Applications - auto-job{% endblock %}
+{% block content %}
+<h1>Applications</h1>
+<div class="stat-grid">
+  <div class="stat-tile"><div class="stat-value">{{ stats.applied_today }}</div><div class="stat-label">Applied today</div></div>
+  <div class="stat-tile"><div class="stat-value">{{ stats.found_today }}</div><div class="stat-label">Found today</div></div>
+  <div class="stat-tile"><div class="stat-value">{{ stats.replies_7d }}</div><div class="stat-label">Replies last 7 days</div></div>
+  <div class="stat-tile"><div class="stat-value">{{ stats.interviews }}</div><div class="stat-label">Interviews</div></div>
+</div>
+<div class="card table-card">
+  {% if applications %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Company</th><th>Role</th><th>Sent via</th><th>When</th><th>Status</th><th>Proof</th></tr>
+    </thead>
+    <tbody>
+      {% for a in applications %}
+      <tr>
+        <td><a class="row-link" href="/applications/{{ a.id }}">{{ a.company_name or "Unknown" }}</a></td>
+        <td><a class="row-link" href="/applications/{{ a.id }}">{{ a.job_title }}</a></td>
+        <td>{{ a.channel }}</td>
+        <td>{{ a.applied_at }}</td>
+        <td><span class="chip chip-{{ a.status }}">{{ a.status.replace('_', ' ') }}</span></td>
+        <td>
+          {% if a.proof_count > 0 %}
+          <a href="/applications/{{ a.id }}#proofs">{{ a.proof_count }} file{{ 's' if a.proof_count != 1 else '' }}</a>
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No applications yet. The first scan runs at {{ next_scan }}.</p>
+  {% endif %}
+</div>
+{% endblock %}

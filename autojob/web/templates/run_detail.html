@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id }} - auto-job{% endblock %}
+{% block content %}
+<a href="/runs" class="back-link">&larr; Back to run log</a>
+<h1>Run {{ run.id }}</h1>
+<p class="secondary">
+  {{ run.trigger }} started {{ run.started_at }}{% if run.finished_at %}, finished {{ run.finished_at }}{% endif %}
+</p>
+<div class="stat-grid">
+  <div class="stat-tile"><div class="stat-value">{{ run.found }}</div><div class="stat-label">Found</div></div>
+  <div class="stat-tile"><div class="stat-value">{{ run.filtered }}</div><div class="stat-label">Filtered</div></div>
+  <div class="stat-tile"><div class="stat-value">{{ run.applied }}</div><div class="stat-label">Applied</div></div>
+  <div class="stat-tile"><div class="stat-value">{{ run.failed }}</div><div class="stat-label">Failed</div></div>
+</div>
+<div class="card">
+  <h2>Log</h2>
+  <pre class="run-log">{{ run.log or "No log yet." }}</pre>
+</div>
+{% endblock %}

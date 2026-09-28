@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Targets - auto-job{% endblock %}
+{% block content %}
+<h1>Targets</h1>
+<div class="card">
+  <form method="post" action="/targets">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label for="titles">Job titles and keywords (one per line)</label>
+    <textarea id="titles" name="titles" rows="8">{{ targets.titles | join('\n') }}</textarea>
+
+    <label for="locations">Locations (one per line)</label>
+    <textarea id="locations" name="locations" rows="2">{{ targets.locations | join('\n') }}</textarea>
+
+    <label for="max_years">Maximum years of experience</label>
+    <input type="number" id="max_years" name="max_years" min="0" value="{{ targets.max_years }}">
+
+    <label for="excluded_companies">Excluded companies (one per line)</label>
+    <textarea id="excluded_companies" name="excluded_companies" rows="4">{{ targets.excluded_companies | join('\n') }}</textarea>
+
+    <label for="priority_companies">Priority companies (one per line)</label>
+    <textarea id="priority_companies" name="priority_companies" rows="4">{{ targets.priority_companies | join('\n') }}</textarea>
+
+    <label for="daily_cap_per_source">Daily cap per source</label>
+    <input type="number" id="daily_cap_per_source" name="daily_cap_per_source" min="1" value="{{ targets.daily_cap_per_source }}">
+
+    <label for="scan_times">Scan times, 24 hour HH:MM (one per line)</label>
+    <textarea id="scan_times" name="scan_times" rows="2">{{ targets.scan_times | join('\n') }}</textarea>
+
+    <button type="submit">Save targets</button>
+    {% if saved %}<span class="saved-indicator">Saved.</span>{% endif %}
+  </form>
+</div>
+{% endblock %}

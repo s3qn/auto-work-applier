@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}auto-job{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <input type="checkbox" id="sidebar-toggle" class="sidebar-toggle-input">
+  <div class="app-shell">
+    <header class="topbar">
+      <label for="sidebar-toggle" class="menu-button" aria-label="Menu">&#9776;</label>
+      <span class="brand">auto-job</span>
+    </header>
+    <nav class="sidebar">
+      <div class="brand-full">auto-job</div>
+      <ul class="nav-list">
+        <li><a class="{{ 'active' if active_section == 'applications' else '' }}" href="/">Applications</a></li>
+        <li>
+          <a class="{{ 'active' if active_section == 'needs_help' else '' }}" href="/needs-help">
+            Needs help{% if needs_help_count > 0 %} <span class="badge">{{ needs_help_count }}</span>{% endif %}
+          </a>
+        </li>
+        <li><a class="{{ 'active' if active_section == 'submit' else '' }}" href="/submit">Submit a link</a></li>
+        <li><a class="{{ 'active' if active_section == 'targets' else '' }}" href="/targets">Targets</a></li>
+        <li><a class="{{ 'active' if active_section == 'runs' else '' }}" href="/runs">Run log</a></li>
+        <li><a class="{{ 'active' if active_section == 'profile' else '' }}" href="/profile">Profile and CV</a></li>
+      </ul>
+      <div class="sidebar-bottom">
+        <div class="next-scan">Next scan {{ next_scan }}</div>
+        <form method="post" action="/runs/now">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="run-now-button">Run now</button>
+        </form>
+        <form method="post" action="/logout" class="logout-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="logout-button">Log out</button>
+        </form>
+      </div>
+    </nav>
+    <main class="content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>
