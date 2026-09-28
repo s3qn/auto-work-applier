@@ -26,6 +26,7 @@ from autojob.apply.router import pick_handler
 from autojob.browser.context import BrowserBusyError, browser_page
 from autojob.config import load_config
 from autojob.llm.cv import latest_cv_pdf
+from autojob.pipeline import events
 from autojob.web.deps import get_answer_bank, get_profile_answers
 
 CHANNEL_BY_HANDLER_NAME = {"greenhouse": "greenhouse", "lever": "lever", "comeet": "comeet"}
@@ -58,7 +59,11 @@ def _handler_channel(handler) -> str:
     return CHANNEL_BY_HANDLER_NAME.get(name, "other")
 
 
-def apply_to_job(job, *, auto_submit: bool) -> dict:
+def _job_label(job) -> tuple[str, str]:
+    return job["title"], _row_get(job, "company_name", "") or "Unknown"
+
+
+def apply_to_job(job, *, auto_submit: bool, run_id: int | None = None) -> dict:
     """Apply to one job. `job` is a row from `db.get_job_with_company` (or
     anything with the same keys: id, url, title, description, company_name,
     company_tldr, company_careers_url).
@@ -68,36 +73,52 @@ def apply_to_job(job, *, auto_submit: bool) -> dict:
     answer all resolve to a recorded outcome (a `failed` application or a
     `needs_help` item) instead of crashing the caller, so one bad job never
     stops a scan or a background "Apply now" click.
+
+    `run_id`, when given, emits `run_events` rows for the live view (which
+    ATS was picked, filling, and the final outcome). Left `None` for calls
+    outside a pipeline run (the "Apply now" button, `release_application`).
     """
     config = load_config()
     conn = db.get_connection(config)
     try:
         job_id = job["id"]
+        title, company = _job_label(job)
         db.update_job_status(conn, job_id, "applying")
         apply_url = _resolve_apply_url(job)
         try:
             with browser_page(config, headless=True) as page:
                 page.goto(apply_url, wait_until="domcontentloaded")
-                return _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit)
+                return _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit, run_id)
         except BrowserBusyError as exc:
             db.update_job_status(conn, job_id, "queued")
+            if run_id is not None:
+                events.emit(conn, run_id, "apply", "error", f"apply: {title} @ {company}: {exc}")
             return {"status": "failed", "application_id": None, "reason": str(exc)}
         except Exception as exc:  # noqa: BLE001 - a browser-level failure must never crash the caller
             reason = f"Apply attempt failed before a form could be filled: {exc}"
             db.create_help_item(conn, job_id=job_id, reason=reason)
             db.update_job_status(conn, job_id, "needs_help")
+            if run_id is not None:
+                events.emit(conn, run_id, "apply", "error", f"apply: {title} @ {company}: {reason}")
             return {"status": "failed", "application_id": None, "reason": reason}
     finally:
         conn.close()
 
 
-def _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit: bool) -> dict:
+def _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit: bool, run_id: int | None = None) -> dict:
+    title, company = _job_label(job)
     handler = pick_handler(apply_url, page)
     if handler is None:
         reason = f"No apply handler recognizes this ATS yet ({apply_url})."
         db.create_help_item(conn, job_id=job_id, reason=reason)
         db.update_job_status(conn, job_id, "needs_help")
+        if run_id is not None:
+            events.emit(conn, run_id, "apply", "info", f"apply: {title} @ {company}: no ATS handler, needs help.")
         return {"status": "needs_help", "application_id": None, "reason": reason}
+
+    channel = _handler_channel(handler)
+    if run_id is not None:
+        events.emit(conn, run_id, "apply", "info", f"apply: {title} @ {company} via {channel}: filling.")
 
     profile_answers = get_profile_answers(conn)
     answer_bank = get_answer_bank(conn)
@@ -115,7 +136,7 @@ def _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit: bo
     application_id = db.create_application(
         conn,
         job_id=job_id,
-        channel=_handler_channel(handler),
+        channel=channel,
         status="needs_help",  # placeholder, corrected below once the handler actually runs
         cover_letter=content["cover_letter"],
         answers_json=json.dumps(content["screening_answers"]),
@@ -125,16 +146,24 @@ def _fill_and_record(conn, config, job, job_id, apply_url, page, auto_submit: bo
     cover_letter_path = proof.save_cover_letter(config, application_id, content["cover_letter"])
     merged_answers["cover_letter_file"] = str(cover_letter_path)
 
-    return _run_handler_and_finalize(conn, config, job_id, application_id, handler, page, merged_answers, cv_path, auto_submit)
+    return _run_handler_and_finalize(
+        conn, config, job_id, application_id, handler, page, merged_answers, cv_path, auto_submit,
+        run_id=run_id, title=title, company=company, channel=channel,
+    )
 
 
-def _run_handler_and_finalize(conn, config, job_id, application_id, handler, page, merged_answers, cv_path, auto_submit: bool) -> dict:
+def _run_handler_and_finalize(
+    conn, config, job_id, application_id, handler, page, merged_answers, cv_path, auto_submit: bool,
+    *, run_id: int | None = None, title: str = "", company: str = "", channel: str = "",
+) -> dict:
     try:
         result = handler.apply(page, merged_answers, cv_path, auto_submit)
     except Exception as exc:  # noqa: BLE001 - a handler bug must never crash the run
         reason = f"Apply handler raised an error: {exc}"
         db.update_application(conn, application_id, status="failed", notes=reason)
         db.update_job_status(conn, job_id, "failed")
+        if run_id is not None:
+            events.emit(conn, run_id, "apply", "error", f"apply: {title} @ {company} via {channel}: {reason}")
         return {"status": "failed", "application_id": application_id, "reason": reason}
 
     proof.capture_form_screenshot(conn, config, application_id, page)
@@ -155,6 +184,9 @@ def _run_handler_and_finalize(conn, config, job_id, application_id, handler, pag
     else:
         db.update_application(conn, application_id, status="failed", notes=reason)
         db.update_job_status(conn, job_id, "failed")
+
+    if run_id is not None:
+        events.emit(conn, run_id, "apply", "info", f"apply: {title} @ {company} via {channel}: {status}.")
 
     return {"status": status, "application_id": application_id, "reason": reason}
 

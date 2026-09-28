@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
+from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from autojob import auth, db
 from autojob.config import Config
+from autojob.pipeline import events
 from autojob.pipeline import run as run_module
 from autojob.web.deps import (
     base_context,
@@ -459,6 +462,22 @@ def runs_list(
     return templates.TemplateResponse(request, "runs.html", ctx)
 
 
+@router.get("/runs/live")
+def runs_live_latest(request: Request, conn=Depends(get_db)):
+    """The sidebar's "Live" link: jumps straight to the most recent run's
+    live terminal (in progress or not, SSE replay works either way), or
+    back to the run log if there is no run yet. Registered before
+    `/runs/{run_id}` so "live" is never parsed as a run id."""
+    runs = db.list_runs(conn)
+    if not runs:
+        return RedirectResponse("/runs", status_code=303)
+    # list_runs orders by started_at, whose 1-second resolution can tie for
+    # two runs kicked off in the same second: break ties by id, which is
+    # always in true creation order.
+    latest = max(runs, key=lambda r: r["id"])
+    return RedirectResponse(f"/runs/{latest['id']}/live", status_code=303)
+
+
 @router.get("/runs/{run_id}")
 def run_detail(
     run_id: int,
@@ -471,6 +490,7 @@ def run_detail(
         raise HTTPException(status_code=404, detail="Run not found.")
     ctx = base_context(request, conn)
     ctx["run"] = run_row
+    ctx["progress"] = events.read_progress(conn, run_id)
     return templates.TemplateResponse(request, "run_detail.html", ctx)
 
 
@@ -485,6 +505,146 @@ def run_log_partial(
     if run_row is None:
         raise HTTPException(status_code=404, detail="Run not found.")
     return templates.TemplateResponse(request, "partials/run_log_card.html", {"request": request, "run": run_row})
+
+
+@router.get("/runs/{run_id}/progress")
+def run_progress_partial(
+    run_id: int,
+    request: Request,
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    run_row = db.get_run(conn, run_id)
+    if run_row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    ctx = {"request": request, "run": run_row, "progress": events.read_progress(conn, run_id)}
+    return templates.TemplateResponse(request, "partials/run_progress_panel.html", ctx)
+
+
+@router.get("/runs/{run_id}/live")
+def run_live(
+    run_id: int,
+    request: Request,
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    """The dedicated dark, full-screen live terminal. Not built on
+    base.html's light sidebar shell: this is its own standalone page (same
+    pattern as login.html), styled as a terminal and driven entirely by the
+    SSE stream at /runs/{run_id}/stream, with a 1s poll of
+    /runs/{run_id}/events as a fallback if EventSource errors."""
+    run_row = db.get_run(conn, run_id)
+    if run_row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    ctx = {
+        "request": request,
+        "run": run_row,
+        "progress": events.read_progress(conn, run_id),
+        "csrf_token": auth.csrf_token_for_session(request),
+    }
+    return templates.TemplateResponse(request, "run_live.html", ctx)
+
+
+def _run_event_payload(row: object) -> dict:
+    """A `run_events` row as a JSON-serializable dict, shared by the SSE
+    stream and the polling fallback so both sides agree on the shape."""
+    detail_raw = row["detail"]
+    detail = json.loads(detail_raw) if detail_raw else None
+    return {
+        "id": row["id"],
+        "ts": row["ts"],
+        "phase": row["phase"],
+        "kind": row["kind"],
+        "message": row["message"],
+        "detail": detail,
+    }
+
+
+def _format_sse(payload: dict) -> str:
+    return f"id: {payload['id']}\ndata: {json.dumps(payload)}\n\n"
+
+
+async def stream_run_events(config: Config, run_id: int, since_id: int = 0):
+    """Replay every `run_events` row for `run_id` after `since_id`, then
+    poll for new ones roughly every 500ms until the run's `finished_at` is
+    set, at which point it emits one final synthetic "finished" event and
+    stops. The pipeline runs in a background thread and this generator runs
+    on the asyncio event loop: they only ever talk through the database, one
+    connection opened for the lifetime of this generator.
+
+    Calling this directly (not through the `/stream` route) against a run
+    that is already finished replays its history and returns immediately,
+    with no wait: useful for tests.
+    """
+    conn = db.get_connection(config)
+    try:
+        cursor = since_id
+        while True:
+            rows = db.list_run_events_since(conn, run_id, cursor)
+            for row in rows:
+                cursor = row["id"]
+                yield _format_sse(_run_event_payload(row))
+            run_row = db.get_run(conn, run_id)
+            if run_row is None:
+                return
+            if run_row["finished_at"] is not None:
+                yield _format_sse(
+                    {
+                        "id": cursor,
+                        "ts": run_row["finished_at"],
+                        "phase": "system",
+                        "kind": "finished",
+                        "message": "Run finished.",
+                        "detail": None,
+                    }
+                )
+                return
+            await asyncio.sleep(0.5)
+    finally:
+        conn.close()
+
+
+@router.get("/runs/{run_id}/stream")
+async def run_events_stream(
+    run_id: int,
+    request: Request,
+    since: int = 0,
+    config: Config = Depends(get_config),
+):
+    conn = db.get_connection(config)
+    try:
+        run_row = db.get_run(conn, run_id)
+    finally:
+        conn.close()
+    if run_row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(
+        stream_run_events(config, run_id, since), media_type="text/event-stream", headers=headers
+    )
+
+
+@router.get("/runs/{run_id}/events")
+def run_events_json(
+    run_id: int,
+    request: Request,
+    since: int = 0,
+    conn=Depends(get_db),
+):
+    """The 1s-poll fallback for the live page when EventSource errors (a
+    proxy that buffers or drops long-lived connections, mostly). Same
+    replay-since-a-cursor semantics as the SSE stream, as plain JSON."""
+    run_row = db.get_run(conn, run_id)
+    if run_row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    rows = db.list_run_events_since(conn, run_id, since)
+    payloads = [_run_event_payload(row) for row in rows]
+    return {
+        "events": payloads,
+        "finished": run_row["finished_at"] is not None,
+        "finished_at": run_row["finished_at"],
+        "last_id": payloads[-1]["id"] if payloads else since,
+    }
 
 
 def _run_scan_and_release(lock: threading.Lock) -> None:

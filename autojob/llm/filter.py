@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 
 from autojob.llm.cli import ClaudeCliError, extract_json, run_claude
+from autojob.pipeline import events
 
 BATCH_SIZE = 10
 FILTER_TIMEOUT = 180
@@ -93,7 +95,24 @@ def _build_prompt(cv_text: str, jobs: list[dict]) -> str:
     )
 
 
-def filter_jobs(jobs: list[dict], cv_text: str, *, work_dir: Path, batch_size: int = BATCH_SIZE) -> list[dict]:
+def _score_line(job: dict, result: dict) -> str:
+    title = job.get("title") or "(untitled)"
+    company = job.get("company") or "Unknown"
+    score = result.get("fit_score")
+    score_text = str(int(round(score))) if isinstance(score, (int, float)) else "?"
+    verdict = "keep" if result["status"] == "queued" else "drop"
+    return f"score {score_text} {verdict} - {title} @ {company}: {result['reason']}"
+
+
+def filter_jobs(
+    jobs: list[dict],
+    cv_text: str,
+    *,
+    work_dir: Path,
+    batch_size: int = BATCH_SIZE,
+    conn: sqlite3.Connection | None = None,
+    run_id: int | None = None,
+) -> list[dict]:
     """Screen jobs against Sean's CV, several per CLI call.
 
     Returns one result dict per input job, same order:
@@ -102,22 +121,51 @@ def filter_jobs(jobs: list[dict], cv_text: str, *, work_dir: Path, batch_size: i
     On any failure for a batch (timeout, bad JSON, wrong shape), every job in
     that batch gets status "new" and reason "filter failed" rather than
     crashing the run or silently dropping the job.
+
+    When `conn` and `run_id` are given (a real pipeline run, not a direct
+    test call), this emits one `run_events` row per job as its result is
+    decided (a title screen drop, or a parsed LLM score) plus a `progress`
+    snapshot after the title screen pass and after every LLM batch, so the
+    live view advances in step with the actual CLI calls instead of only
+    seeing results once the whole function returns.
     """
+    total = len(jobs)
+    live = conn is not None and run_id is not None
+
     # First pass: cheap, deterministic title screen. Obvious non-fits (a lawyer,
     # a CTO) never reach the LLM, which saves calls and stops the model from
     # occasionally keeping them. Only the survivors go on to the LLM batch below.
     results: list[dict | None] = [None] * len(jobs)
     to_score: list[tuple[int, dict]] = []
+    screened = 0
+    filtered_out = 0
     for idx, job in enumerate(jobs):
         blocked = title_is_blocked(job.get("title", ""))
         if blocked:
-            results[idx] = {
+            result = {
                 "status": "filtered_out",
                 "fit_score": 0.0,
                 "reason": f"title screen: not a hands-on security role ({blocked})",
             }
+            results[idx] = result
+            screened += 1
+            filtered_out += 1
+            if live:
+                title = job.get("title") or "(untitled)"
+                events.emit(
+                    conn, run_id, "filter", "info",
+                    f"title screen drop - {title}: not a hands-on security role",
+                    detail={"title": title, "company": job.get("company"), "blocked_on": blocked},
+                )
         else:
             to_score.append((idx, job))
+
+    if live and screened:
+        events.bump_progress(
+            conn, run_id, "filter",
+            f"Title screen: {screened} job(s) dropped before scoring.",
+            done=screened, total=total, filtered=filtered_out,
+        )
 
     for start in range(0, len(to_score), batch_size):
         batch_pairs = to_score[start : start + batch_size]
@@ -129,19 +177,46 @@ def filter_jobs(jobs: list[dict], cv_text: str, *, work_dir: Path, batch_size: i
             parsed = extract_json(raw)
             if not isinstance(parsed, list) or len(parsed) != len(batch):
                 raise ClaudeCliError("filter response was not a JSON array matching the batch size")
-            for item, idx in zip(parsed, batch_indices):
+            for item, idx, job in zip(parsed, batch_indices, batch):
                 if not isinstance(item, dict):
                     raise ClaudeCliError("filter response item was not a JSON object")
                 fit_score = item.get("fit_score")
-                results[idx] = {
+                result = {
                     "status": "queued" if item.get("keep") else "filtered_out",
                     "fit_score": float(fit_score) if fit_score is not None else None,
                     "reason": str(item.get("reason") or "")[:300],
                 }
+                results[idx] = result
+                screened += 1
+                if result["status"] == "filtered_out":
+                    filtered_out += 1
+                if live:
+                    events.emit(
+                        conn, run_id, "filter", "score", _score_line(job, result),
+                        detail={
+                            "title": job.get("title"), "company": job.get("company"),
+                            "fit_score": result["fit_score"], "status": result["status"],
+                            "reason": result["reason"],
+                        },
+                    )
         except (ClaudeCliError, ValueError, TypeError) as exc:
             reason = f"filter failed: {exc}"[:300]
-            for idx in batch_indices:
-                results[idx] = {"status": "new", "fit_score": None, "reason": reason}
+            for idx, job in zip(batch_indices, batch):
+                result = {"status": "new", "fit_score": None, "reason": reason}
+                results[idx] = result
+                screened += 1
+                if live:
+                    events.emit(
+                        conn, run_id, "filter", "error",
+                        f"filter batch failed for {job.get('title') or '(untitled)'}: {exc}",
+                        detail={"title": job.get("title"), "company": job.get("company")},
+                    )
+        if live:
+            events.bump_progress(
+                conn, run_id, "filter",
+                f"Filter: {screened}/{total} screened.",
+                done=screened, total=total, filtered=filtered_out,
+            )
 
     # Every slot is filled by the title screen or one of the branches above; the
     # fallback keeps the return type honest if a job somehow slipped through.

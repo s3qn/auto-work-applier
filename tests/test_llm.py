@@ -155,6 +155,77 @@ def test_filter_jobs_batches_by_batch_size(monkeypatch, tmp_path):
     assert len(calls) == 2
 
 
+# --- filter_jobs live events (the run_events bridge) -----------------------
+
+def test_filter_jobs_emits_score_and_progress_events_with_a_fake_llm(config, monkeypatch, tmp_path):
+    """A fake LLM response (no real CLI call) run through the real
+    filter_jobs, with a real conn/run_id, must emit at least one "score"
+    event and at least one "progress" event through the events helper."""
+    from autojob import db
+    from autojob.pipeline import events as events_module
+
+    calls = []
+    monkeypatch.setattr(events_module, "emit", lambda *a, **k: calls.append((a, k)))
+
+    def fake_run(cmd, input, capture_output, text, cwd, timeout):  # noqa: A002
+        response = [{"fit_score": 8, "keep": True, "reason": "great fit"}]
+        return FakeCompleted(json.dumps({"result": json.dumps(response)}))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        run_id = db.create_run(conn, trigger="manual")
+        jobs = [{"title": "Penetration Tester", "company": "Acme", "location": "Israel", "description": ""}]
+        llm_filter.filter_jobs(jobs, "cv", work_dir=tmp_path, conn=conn, run_id=run_id)
+    finally:
+        conn.close()
+
+    kinds = {call[0][3] for call in calls}  # emit(conn, run_id, phase, kind, message, detail=None)
+    assert "score" in kinds
+    assert "progress" in kinds
+    score_messages = [call[0][4] for call in calls if call[0][3] == "score"]
+    assert any("Penetration Tester @ Acme" in m for m in score_messages)
+
+
+def test_filter_jobs_title_screen_drop_emits_an_info_event(config, monkeypatch, tmp_path):
+    from autojob import db
+    from autojob.pipeline import events as events_module
+
+    calls = []
+    monkeypatch.setattr(events_module, "emit", lambda *a, **k: calls.append(a))
+
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        run_id = db.create_run(conn, trigger="manual")
+        jobs = [{"title": "Corporate Lawyer", "company": "Acme", "location": "Israel", "description": ""}]
+        llm_filter.filter_jobs(jobs, "cv", work_dir=tmp_path, conn=conn, run_id=run_id)
+    finally:
+        conn.close()
+
+    messages = [call[4] for call in calls]
+    assert any("title screen drop - Corporate Lawyer" in m for m in messages)
+
+
+def test_filter_jobs_without_conn_or_run_id_emits_nothing(monkeypatch, tmp_path):
+    """The direct-call path every other filter test uses (no conn/run_id)
+    must stay silent: filter_jobs is also called from places with no run in
+    progress (a future dry-run tool, tests), and it must not raise or write
+    events for those."""
+    from autojob.pipeline import events as events_module
+
+    calls = []
+    monkeypatch.setattr(events_module, "emit", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps([{"fit_score": 5, "keep": True, "reason": "ok"}])))
+
+    jobs = [{"title": "Penetration Tester", "company": "Acme", "location": "Israel", "description": ""}]
+    llm_filter.filter_jobs(jobs, "cv", work_dir=tmp_path)
+
+    assert calls == []
+
+
 # --- research_company -------------------------------------------------
 
 def test_research_company_returns_parsed_fields(monkeypatch, tmp_path):

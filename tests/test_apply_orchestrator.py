@@ -188,6 +188,48 @@ def test_apply_to_job_field_it_cannot_answer_creates_help_item(config, monkeypat
     assert application["status"] == "needs_help"
 
 
+def test_apply_to_job_emits_events_when_run_id_is_given(config, monkeypatch):
+    """A real pipeline run passes its run_id through apply_to_job so the
+    live view can show which ATS was picked, the filling step, and the
+    final outcome. Monkeypatch the events helper (no real conn needed for
+    the fake calls) and check both are emitted, tagged with that run_id."""
+    job = _seed_job(config)
+    page = FakePage()
+    monkeypatch.setattr(apply_module, "browser_page", _fake_browser_page_factory(page))
+    handler, calls = _fake_handler({"status": "ready_to_submit", "reason": None})
+    monkeypatch.setattr(apply_module, "pick_handler", lambda url, page: handler)
+    _patch_claude(monkeypatch)
+
+    emitted = []
+    monkeypatch.setattr(apply_module.events, "emit", lambda *a, **k: emitted.append(a))
+
+    result = apply_module.apply_to_job(job, auto_submit=False, run_id=42)
+
+    assert result["status"] == "ready_to_submit"
+    assert emitted, "expected apply_to_job to emit at least one run_events row"
+    assert all(call[1] == 42 for call in emitted)  # run_id threaded through every emit call
+    messages = [call[4] for call in emitted]  # emit(conn, run_id, phase, kind, message, detail=None)
+    assert any("filling" in m for m in messages)
+    assert any("ready_to_submit" in m for m in messages)
+    assert any("greenhouse" in m for m in messages)
+
+
+def test_apply_to_job_without_run_id_emits_nothing(config, monkeypatch):
+    job = _seed_job(config)
+    page = FakePage()
+    monkeypatch.setattr(apply_module, "browser_page", _fake_browser_page_factory(page))
+    handler, calls = _fake_handler({"status": "ready_to_submit", "reason": None})
+    monkeypatch.setattr(apply_module, "pick_handler", lambda url, page: handler)
+    _patch_claude(monkeypatch)
+
+    emitted = []
+    monkeypatch.setattr(apply_module.events, "emit", lambda *a, **k: emitted.append(a))
+
+    apply_module.apply_to_job(job, auto_submit=False)
+
+    assert emitted == []
+
+
 def test_apply_to_job_browser_busy_requeues_the_job(config, monkeypatch):
     job = _seed_job(config)
 

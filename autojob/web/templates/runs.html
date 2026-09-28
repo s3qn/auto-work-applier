@@ -7,7 +7,7 @@
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Started</th><th>Trigger</th><th>Found</th><th>Filtered</th><th>Applied</th><th>Failed</th><th>Finished</th></tr>
+      <tr><th>Started</th><th>Trigger</th><th>Found</th><th>Filtered</th><th>Applied</th><th>Failed</th><th>Finished</th><th>Live</th></tr>
     </thead>
     <tbody>
       {% for run in runs %}
@@ -19,6 +19,7 @@
         <td>{{ run.applied }}</td>
         <td>{{ run.failed }}</td>
         <td>{{ run.finished_at or "in progress" }}</td>
+        <td><a href="/runs/{{ run.id }}/live">Watch</a></td>
       </tr>
       {% endfor %}
     </tbody>

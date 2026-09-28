@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Run {{ run.id }} live - auto-job</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --term-bg: #0E1111;
+      --term-panel: #0B0D0D;
+      --term-text: #D6E2DA;
+      --term-accent: #5BE49B;
+      --term-dim: #6B7B74;
+      --term-error: #FF6B6B;
+      --term-border: #22302A;
+      --term-track: #1A1F1D;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--term-bg);
+      color: var(--term-text);
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+    a { color: var(--term-accent); }
+    .term-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--term-border);
+      background: var(--term-panel);
+    }
+    .term-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--term-accent);
+    }
+    .term-back {
+      color: var(--term-dim);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .term-back:hover { color: var(--term-text); }
+    .term-status {
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--term-border);
+      color: var(--term-dim);
+    }
+    .term-status.is-live { color: var(--term-accent); border-color: var(--term-accent); }
+    .term-status.is-finished { color: var(--term-text); border-color: var(--term-text); }
+    .term-spacer { flex: 1; }
+    .term-toggle {
+      background: transparent;
+      border: 1px solid var(--term-border);
+      color: var(--term-text);
+      font-family: inherit;
+      font-size: 12px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .term-toggle:hover { border-color: var(--term-accent); }
+
+    .term-progress {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--term-border);
+      background: var(--term-panel);
+    }
+    .term-bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--term-dim);
+      margin-bottom: 6px;
+    }
+    .term-bar-count { color: var(--term-text); }
+    .term-bar-track {
+      height: 6px;
+      background: var(--term-track);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .term-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--term-accent);
+      border-radius: 999px;
+      transition: width 0.3s ease;
+    }
+
+    .term-output {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px 40px;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .term-line {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .term-kind-score.term-keep { color: var(--term-accent); }
+    .term-kind-score.term-drop { color: var(--term-dim); }
+    .term-kind-info { color: var(--term-text); }
+    .term-kind-error { color: var(--term-error); }
+    .term-kind-finished { color: var(--term-accent); font-weight: 700; }
+    .term-empty { color: var(--term-dim); }
+
+    @media (max-width: 700px) {
+      .term-progress { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <header class="term-header">
+    <a class="term-back" href="/runs/{{ run.id }}">&larr; Run {{ run.id }}</a>
+    <span class="term-title">auto-job live</span>
+    <span class="term-status" id="term-status">connecting</span>
+    <span class="term-spacer"></span>
+    <button type="button" class="term-toggle" id="term-scroll-toggle">Pause auto-scroll</button>
+  </header>
+
+  <div class="term-progress" id="term-progress">
+    {% for phase_key, phase_label in (("scan", "Scan"), ("filter", "Filter"), ("research", "Research"), ("apply", "Apply")) %}
+    {% set p = progress.get(phase_key, {"done": 0, "total": 0}) %}
+    <div class="term-bar" data-phase="{{ phase_key }}">
+      <div class="term-bar-label">
+        <span>{{ phase_label }}</span>
+        <span class="term-bar-count" data-role="count">{% if p.total %}{{ p.done }}/{{ p.total }}{% else %}-{% endif %}</span>
+      </div>
+      <div class="term-bar-track">
+        <div class="term-bar-fill" data-role="fill" style="width: {{ ((p.done / p.total * 100) if p.total else 0) | round(1) }}%"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <main class="term-output" id="term-output">
+    <div class="term-line term-empty" id="term-placeholder">Connecting to run {{ run.id }}...</div>
+  </main>
+
+  <script>
+    (function () {
+      var runId = {{ run.id }};
+      var output = document.getElementById("term-output");
+      var placeholder = document.getElementById("term-placeholder");
+      var statusEl = document.getElementById("term-status");
+      var scrollToggle = document.getElementById("term-scroll-toggle");
+      var paused = false;
+      var finished = {{ "true" if run.finished_at else "false" }};
+      var cursor = 0;
+
+      scrollToggle.addEventListener("click", function () {
+        paused = !paused;
+        scrollToggle.textContent = paused ? "Resume auto-scroll" : "Pause auto-scroll";
+        if (!paused) scrollToBottom();
+      });
+
+      function scrollToBottom() {
+        output.scrollTop = output.scrollHeight;
+      }
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = "term-status" + (cls ? " " + cls : "");
+      }
+
+      function appendLine(ev) {
+        if (placeholder) {
+          placeholder.remove();
+          placeholder = null;
+        }
+        var kindClass = "term-kind-" + ev.kind;
+        if (ev.kind === "score" && ev.detail) {
+          kindClass += ev.detail.status === "queued" ? " term-keep" : " term-drop";
+        }
+        var line = document.createElement("div");
+        line.className = "term-line " + kindClass;
+        var ts = (ev.ts || "").replace("T", " ").replace("Z", "");
+        line.textContent = "[" + ts + "] [" + ev.phase + "] " + ev.message;
+        output.appendChild(line);
+        if (!paused) scrollToBottom();
+      }
+
+      function applyProgress(snapshot) {
+        var bars = document.querySelectorAll("#term-progress .term-bar");
+        for (var i = 0; i < bars.length; i++) {
+          var bar = bars[i];
+          var phase = bar.getAttribute("data-phase");
+          var p = snapshot[phase] || { done: 0, total: 0 };
+          var count = bar.querySelector('[data-role="count"]');
+          var fill = bar.querySelector('[data-role="fill"]');
+          count.textContent = p.total ? p.done + "/" + p.total : "-";
+          var pct = p.total ? Math.min(100, (p.done / p.total) * 100) : 0;
+          fill.style.width = pct + "%";
+        }
+      }
+
+      // Progress-kind rows are bookkeeping, not a narrated action: they only
+      // move the bars above, they never print a terminal line.
+      function handleEvent(ev) {
+        if (ev.id) cursor = ev.id;
+        if (ev.kind === "progress" && ev.detail) {
+          applyProgress(ev.detail);
+          return;
+        }
+        if (ev.kind === "finished") {
+          appendLine(ev);
+          setStatus("finished", "is-finished");
+          finished = true;
+          stopEverything();
+          return;
+        }
+        appendLine(ev);
+      }
+
+      var source = null;
+      var pollTimer = null;
+
+      function stopEverything() {
+        if (source) { source.close(); source = null; }
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      }
+
+      function startPolling() {
+        if (pollTimer || finished) return;
+        setStatus("live (polling)", "is-live");
+        pollTimer = setInterval(function () {
+          fetch("/runs/" + runId + "/events?since=" + cursor)
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+              (data.events || []).forEach(handleEvent);
+              if (data.finished) {
+                handleEvent({
+                  id: cursor, kind: "finished", phase: "system",
+                  message: "Run finished.", ts: data.finished_at,
+                });
+              }
+            })
+            .catch(function () { /* network hiccup: keep trying next tick */ });
+        }, 1000);
+      }
+
+      function startStreaming() {
+        try {
+          source = new EventSource("/runs/" + runId + "/stream");
+        } catch (err) {
+          startPolling();
+          return;
+        }
+        setStatus("live", "is-live");
+        source.onmessage = function (e) {
+          try {
+            handleEvent(JSON.parse(e.data));
+          } catch (err) { /* a malformed frame is skipped, not fatal */ }
+        };
+        source.onerror = function () {
+          if (finished) return;
+          if (source) { source.close(); source = null; }
+          startPolling();
+        };
+      }
+
+      if (window.EventSource) {
+        startStreaming();
+      } else {
+        startPolling();
+      }
+    })();
+  </script>
+</body>
+</html>

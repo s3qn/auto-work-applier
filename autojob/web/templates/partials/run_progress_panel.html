@@ -1,0 +1,23 @@
+<div id="run-progress-panel"
+     {% if not run.finished_at %}hx-get="/runs/{{ run.id }}/progress" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  <div class="stat-grid">
+    <div class="stat-tile"><div class="stat-value">{{ run.found }}</div><div class="stat-label">Found</div></div>
+    <div class="stat-tile"><div class="stat-value">{{ run.filtered }}</div><div class="stat-label">Filtered</div></div>
+    <div class="stat-tile"><div class="stat-value">{{ run.applied }}</div><div class="stat-label">Applied</div></div>
+    <div class="stat-tile"><div class="stat-value">{{ run.failed }}</div><div class="stat-label">Failed</div></div>
+  </div>
+  <div class="progress-header">
+    {% for phase_key, phase_label in (("scan", "Scan"), ("filter", "Filter"), ("research", "Research"), ("apply", "Apply")) %}
+    {% set p = progress.get(phase_key, {"done": 0, "total": 0}) %}
+    <div class="progress-bar">
+      <div class="progress-bar-label">
+        <span>{{ phase_label }}</span>
+        <span class="progress-bar-count">{% if p.total %}{{ p.done }}/{{ p.total }}{% else %}-{% endif %}</span>
+      </div>
+      <div class="progress-bar-track">
+        <div class="progress-bar-fill" style="width: {{ ((p.done / p.total * 100) if p.total else 0) | round(1) }}%"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>

@@ -42,7 +42,7 @@ def _patch_no_op_apply(monkeypatch, calls=None):
     real browser for every queued job. Records calls (job, auto_submit) if
     a list is given, and never touches the database, so job/application
     status stays exactly what the filter phase set it to."""
-    def fake_apply_to_job(job, *, auto_submit):
+    def fake_apply_to_job(job, *, auto_submit, run_id=None):
         if calls is not None:
             calls.append((job, auto_submit))
         return {"status": "ready_to_submit", "application_id": None, "reason": None}
@@ -68,7 +68,7 @@ def test_run_scan_creates_queued_and_filtered_jobs_and_researches_company(config
     dropped = _job(n=2, title="VP of Sales", company="Beta")
     _patch_sources(monkeypatch, linkedin_jobs=[kept, dropped])
 
-    def fake_filter(jobs, cv_text, *, work_dir, batch_size=10):
+    def fake_filter(jobs, cv_text, *, work_dir, batch_size=10, **kwargs):
         results = []
         for job in jobs:
             if job["title"] == "Penetration Tester":
@@ -116,7 +116,7 @@ def test_run_scan_does_not_resurface_already_seen_jobs(config, monkeypatch):
     monkeypatch.setattr(
         llm_filter,
         "filter_jobs",
-        lambda jobs, cv_text, *, work_dir, batch_size=10: [
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
             {"status": "queued", "fit_score": 7.0, "reason": "ok"} for _ in jobs
         ],
     )
@@ -162,7 +162,7 @@ def test_run_scan_never_resurfaces_an_applied_job(config, monkeypatch):
     monkeypatch.setattr(
         llm_filter,
         "filter_jobs",
-        lambda jobs, cv_text, *, work_dir, batch_size=10: [
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
             {"status": "queued", "fit_score": 7.0, "reason": "ok"} for _ in jobs
         ],
     )
@@ -193,7 +193,7 @@ def test_run_scan_logs_blocked_source_and_continues(config, monkeypatch):
     monkeypatch.setattr(
         llm_filter,
         "filter_jobs",
-        lambda jobs, cv_text, *, work_dir, batch_size=10: [
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
             {"status": "queued", "fit_score": 6.0, "reason": "ok"} for _ in jobs
         ],
     )
@@ -217,7 +217,7 @@ def test_run_scan_filter_failure_leaves_job_new_not_queued(config, monkeypatch):
     monkeypatch.setattr(
         llm_filter,
         "filter_jobs",
-        lambda jobs, cv_text, *, work_dir, batch_size=10: [
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
             {"status": "new", "fit_score": None, "reason": "filter failed: timeout"} for _ in jobs
         ],
     )
@@ -242,7 +242,7 @@ def test_run_scan_respects_research_cap(config, monkeypatch):
     monkeypatch.setattr(
         llm_filter,
         "filter_jobs",
-        lambda jobs, cv_text, *, work_dir, batch_size=10: [
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
             {"status": "queued", "fit_score": 5.0, "reason": "ok"} for _ in jobs
         ],
     )
@@ -366,3 +366,35 @@ def test_apply_phase_leaves_queued_jobs_alone_when_nothing_queued(config, monkey
         conn.close()
     assert calls == []
     assert run_row["finished_at"] is not None
+
+
+# --- live view: run_events and progress -------------------------------
+
+def test_run_scan_writes_run_events_for_the_live_view(config, monkeypatch):
+    kept = _job(n=1, title="Penetration Tester", company="Acme")
+    _patch_sources(monkeypatch, linkedin_jobs=[kept])
+    monkeypatch.setattr(
+        llm_filter, "filter_jobs",
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
+            {"status": "queued", "fit_score": 8.0, "reason": "good fit"} for _ in jobs
+        ],
+    )
+    _patch_no_op_research(monkeypatch)
+    _patch_no_op_apply(monkeypatch)
+
+    run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
+
+    conn = db.get_connection(config)
+    try:
+        rows = db.list_run_events_since(conn, run_id, 0)
+        run_row = db.get_run(conn, run_id)
+    finally:
+        conn.close()
+
+    assert rows, "expected run_scan to write at least one run_events row"
+    kinds = {row["kind"] for row in rows}
+    phases = {row["phase"] for row in rows}
+    assert "progress" in kinds
+    assert {"scan", "filter", "apply", "system"}.issubset(phases)
+    assert rows[-1]["message"] == "Run finished."
+    assert run_row["progress"] is not None

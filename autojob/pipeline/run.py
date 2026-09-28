@@ -22,6 +22,7 @@ from autojob.config import load_config
 from autojob.llm import filter as llm_filter
 from autojob.llm import research as llm_research
 from autojob.llm.cv import get_cv_text
+from autojob.pipeline import events
 from autojob.sources import SourceError, alljobs, jobmaster, linkedin
 from autojob.web.deps import get_auto_submit, get_targets
 
@@ -118,6 +119,7 @@ def run_scan(
     try:
         run_id = db.create_run(conn, trigger=trigger)
         logger = RunLogger(conn, run_id)
+        events.emit(conn, run_id, "system", "info", f"Run started ({trigger}).")
         found = 0
         filtered = 0
         applied = 0
@@ -127,8 +129,14 @@ def run_scan(
             search_keywords = keywords if keywords is not None else (targets.get("titles") or [])
             if not search_keywords:
                 logger.log("No target titles/keywords configured. Add some on the Targets page.")
+                events.emit(
+                    conn, run_id, "system", "info",
+                    "No target titles/keywords configured. Add some on the Targets page.",
+                )
 
             raw_jobs: list[dict] = []
+            scan_total = len(SOURCES) * len(search_keywords)
+            scan_done = 0
             for source_name in SOURCES:
                 source_count = 0
                 blocked = False
@@ -142,31 +150,59 @@ def run_scan(
                         )
                     except SourceError as exc:
                         logger.log(f"{source_name}: blocked or unusable for '{keyword}': {exc}")
+                        events.emit(
+                            conn, run_id, "scan", "error",
+                            f"{source_name}: blocked or unusable for '{keyword}': {exc}",
+                        )
                         blocked = True
+                        scan_done += 1
+                        events.bump_progress(conn, run_id, "scan", done=scan_done, total=scan_total)
                         continue
                     except Exception as exc:  # noqa: BLE001 - one source must never crash the run
                         logger.log(f"{source_name}: unexpected error for '{keyword}': {exc}")
+                        events.emit(
+                            conn, run_id, "scan", "error",
+                            f"{source_name}: unexpected error for '{keyword}': {exc}",
+                        )
                         failed += 1
+                        scan_done += 1
+                        events.bump_progress(conn, run_id, "scan", done=scan_done, total=scan_total)
                         continue
                     source_count += len(results)
                     raw_jobs.extend(results)
+                    scan_done += 1
+                    events.bump_progress(
+                        conn, run_id, "scan",
+                        f"{source_name}: '{keyword}' returned {len(results)} job(s).",
+                        done=scan_done, total=scan_total,
+                    )
                 status = " (some keywords blocked)" if blocked and source_count else ""
                 logger.log(
                     f"{source_name}: {source_count} job(s) across {len(search_keywords)} keyword(s){status}."
+                )
+                events.emit(
+                    conn, run_id, "scan", "info",
+                    f"{source_name}: {source_count} job(s) across {len(search_keywords)} keyword(s){status}.",
                 )
 
             logger.log(f"Total raw results before dedup: {len(raw_jobs)}.")
             new_jobs = _dedup_new_jobs(conn, raw_jobs)
             found = len(new_jobs)
             logger.log(f"{found} new job(s) after dedup.")
+            db.update_run_counts(conn, run_id, found=found)
+            events.bump_progress(
+                conn, run_id, "scan", f"{found} new job(s) after dedup.",
+                done=scan_total, total=scan_total, found=found,
+            )
 
             if new_jobs:
                 work_dir = config.data_dir / "llm-work"
                 cv_text = get_cv_text(config)
                 if not cv_text:
                     logger.log("No CV on file yet; filtering will run without CV context.")
+                    events.emit(conn, run_id, "filter", "info", "No CV on file yet; filtering will run without CV context.")
 
-                filter_results = llm_filter.filter_jobs(new_jobs, cv_text, work_dir=work_dir)
+                filter_results = llm_filter.filter_jobs(new_jobs, cv_text, work_dir=work_dir, conn=conn, run_id=run_id)
 
                 queued: list[tuple[int, dict]] = []
                 status_counts: dict[str, int] = {}
@@ -191,6 +227,7 @@ def run_scan(
                         )
                     except Exception as exc:  # noqa: BLE001 - one bad job must never stop the rest
                         logger.log(f"Could not store job {job.get('url', '(no url)')}: {exc}")
+                        events.emit(conn, run_id, "filter", "error", f"Could not store job {job.get('url', '(no url)')}: {exc}")
                         failed += 1
                         continue
                     status_counts[result["status"]] = status_counts.get(result["status"], 0) + 1
@@ -204,12 +241,20 @@ def run_scan(
                     f"{filtered} filtered out, "
                     f"{status_counts.get('new', 0)} left as new (filter failed)."
                 )
+                db.update_run_counts(conn, run_id, filtered=filtered)
+                events.bump_progress(
+                    conn, run_id, "filter",
+                    f"Filter results: {status_counts.get('queued', 0)} queued, {filtered} filtered out.",
+                    done=len(new_jobs), total=len(new_jobs), filtered=filtered,
+                )
 
                 researched = 0
                 seen_companies: set[int] = set()
+                research_total = min(len({cid for cid, _ in queued}), max_research)
                 for company_id, job in queued:
                     if researched >= max_research:
                         logger.log(f"Reached the research cap ({max_research}) for this run.")
+                        events.emit(conn, run_id, "research", "info", f"Reached the research cap ({max_research}) for this run.")
                         break
                     if company_id in seen_companies:
                         continue
@@ -218,6 +263,7 @@ def run_scan(
                         company = db.get_company(conn, company_id)
                         if company is None or company["tldr"]:
                             continue
+                        events.emit(conn, run_id, "research", "info", f"research: starting {company['name']}.")
                         info = llm_research.research_company(
                             company["name"], job.get("title", ""), work_dir=work_dir
                         )
@@ -230,32 +276,42 @@ def run_scan(
                         )
                     except Exception as exc:  # noqa: BLE001 - one bad company must never stop the rest
                         logger.log(f"Company research failed for company id {company_id}: {exc}")
+                        events.emit(conn, run_id, "research", "error", f"Company research failed for company id {company_id}: {exc}")
                         failed += 1
                         continue
                     researched += 1
                     logger.log(f"Researched company: {company['name']}.")
+                    events.bump_progress(
+                        conn, run_id, "research", f"research: finished {company['name']}.",
+                        done=researched, total=research_total,
+                    )
                 logger.log(f"Researched {researched} compan{'y' if researched == 1 else 'ies'} this run.")
             else:
                 logger.log("Nothing new to filter or research.")
+                events.emit(conn, run_id, "system", "info", "Nothing new to filter or research.")
 
             auto_submit = get_auto_submit(conn)
             daily_cap = targets.get("daily_cap_per_source") or DEFAULT_DAILY_CAP_PER_SOURCE
             apply_applied, apply_failed = _run_apply_phase(
-                conn, logger, daily_cap=daily_cap, auto_submit=auto_submit
+                conn, logger, daily_cap=daily_cap, auto_submit=auto_submit, run_id=run_id
             )
             applied += apply_applied
             failed += apply_failed
         except Exception as exc:  # noqa: BLE001 - the run must always finish and record something
             logger.log(f"Run failed unexpectedly: {exc}")
+            events.emit(conn, run_id, "system", "error", f"Run failed unexpectedly: {exc}")
             failed += 1
 
         db.finish_run(conn, run_id, found=found, filtered=filtered, applied=applied, failed=failed, log=logger.text)
+        events.emit(conn, run_id, "system", "info", "Run finished.")
         return run_id
     finally:
         conn.close()
 
 
-def _run_apply_phase(conn, logger: RunLogger, *, daily_cap: int, auto_submit: bool) -> tuple[int, int]:
+def _run_apply_phase(
+    conn, logger: RunLogger, *, daily_cap: int, auto_submit: bool, run_id: int | None = None
+) -> tuple[int, int]:
     """Send every currently queued job (found this run or an earlier one)
     through `apply_to_job`, respecting `daily_cap` applications per source
     per day. Returns (applied_count, failed_count). One bad job never stops
@@ -269,20 +325,33 @@ def _run_apply_phase(conn, logger: RunLogger, *, daily_cap: int, auto_submit: bo
     if not queued_jobs:
         return applied, failed
 
-    logger.log(f"Apply phase: {len(queued_jobs)} job(s) queued, daily cap {daily_cap} per source.")
+    total = len(queued_jobs)
+    done = 0
+    logger.log(f"Apply phase: {total} job(s) queued, daily cap {daily_cap} per source.")
+    if run_id is not None:
+        events.emit(conn, run_id, "apply", "info", f"Apply phase: {total} job(s) queued, daily cap {daily_cap} per source.")
     for job in queued_jobs:
         source = job["source"]
         if source not in sent_today_by_source:
             sent_today_by_source[source] = db.count_applications_since(conn, source=source, since_iso=today_start)
         if sent_today_by_source[source] >= daily_cap:
+            done += 1
+            if run_id is not None:
+                events.bump_progress(conn, run_id, "apply", done=done, total=total, applied=applied)
             continue
         try:
-            result = apply_to_job(job, auto_submit=auto_submit)
+            result = apply_to_job(job, auto_submit=auto_submit, run_id=run_id)
         except Exception as exc:  # noqa: BLE001 - one bad job must never stop the apply phase
             logger.log(f"Apply attempt crashed for job {job['id']} ({job['title']}): {exc}")
+            if run_id is not None:
+                events.emit(conn, run_id, "apply", "error", f"apply: crashed for {job['title']}: {exc}")
             failed += 1
+            done += 1
+            if run_id is not None:
+                events.bump_progress(conn, run_id, "apply", done=done, total=total, applied=applied)
             continue
         status = result.get("status")
+        done += 1
         if status in APPLIED_STATUSES:
             applied += 1
             sent_today_by_source[source] = sent_today_by_source[source] + 1
@@ -292,6 +361,9 @@ def _run_apply_phase(conn, logger: RunLogger, *, daily_cap: int, auto_submit: bo
         else:
             failed += 1
             logger.log(f"Apply failed for job {job['id']} ({job['title']}): {result.get('reason')}")
+        if run_id is not None:
+            db.update_run_counts(conn, run_id, applied=applied)
+            events.bump_progress(conn, run_id, "apply", done=done, total=total, applied=applied)
     return applied, failed
 
 

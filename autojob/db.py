@@ -88,7 +88,18 @@ CREATE TABLE IF NOT EXISTS runs (
     filtered INTEGER NOT NULL DEFAULT 0,
     applied INTEGER NOT NULL DEFAULT 0,
     failed INTEGER NOT NULL DEFAULT 0,
-    log TEXT NOT NULL DEFAULT ''
+    log TEXT NOT NULL DEFAULT '',
+    progress TEXT
+);
+
+CREATE TABLE IF NOT EXISTS run_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    ts TEXT NOT NULL,
+    phase TEXT NOT NULL CHECK (phase IN ('scan', 'filter', 'research', 'apply', 'system')),
+    kind TEXT NOT NULL CHECK (kind IN ('info', 'score', 'progress', 'error')),
+    message TEXT NOT NULL,
+    detail TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -97,6 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_applications_job_id ON applications(job_id);
 CREATE INDEX IF NOT EXISTS idx_proofs_application_id ON proofs(application_id);
 CREATE INDEX IF NOT EXISTS idx_help_items_job_id ON help_items(job_id);
 CREATE INDEX IF NOT EXISTS idx_help_items_resolved_at ON help_items(resolved_at);
+CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id, id);
 """
 
 
@@ -223,6 +235,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN external_id TEXT")
     if not _column_exists(conn, "companies", "careers_url"):
         conn.execute("ALTER TABLE companies ADD COLUMN careers_url TEXT")
+    if not _column_exists(conn, "runs", "progress"):
+        conn.execute("ALTER TABLE runs ADD COLUMN progress TEXT")
     conn.commit()
     _rebuild_applications_table(conn)
     _rebuild_proofs_table(conn)
@@ -592,6 +606,66 @@ def list_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def run_in_progress(conn: sqlite3.Connection) -> bool:
     row = conn.execute("SELECT id FROM runs WHERE finished_at IS NULL LIMIT 1").fetchone()
     return row is not None
+
+
+def update_run_counts(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    found: int | None = None,
+    filtered: int | None = None,
+    applied: int | None = None,
+    failed: int | None = None,
+) -> None:
+    """Update whichever of the running counts are given, live while a run is
+    still in progress, so the stat tiles on the run detail page can update
+    before the run finishes instead of only filling in at the end."""
+    columns = []
+    params: list = []
+    for column, value in (("found", found), ("filtered", filtered), ("applied", applied), ("failed", failed)):
+        if value is not None:
+            columns.append(f"{column} = ?")
+            params.append(value)
+    if not columns:
+        return
+    params.append(run_id)
+    conn.execute(f"UPDATE runs SET {', '.join(columns)} WHERE id = ?", params)
+    conn.commit()
+
+
+def update_run_progress(conn: sqlite3.Connection, run_id: int, progress: dict) -> None:
+    """Persist the latest progress snapshot (per-phase done/total and
+    running found/filtered/applied) onto the run row, so a reload without
+    any new `run_events` rows still shows the current bars."""
+    conn.execute("UPDATE runs SET progress = ? WHERE id = ?", (json.dumps(progress), run_id))
+    conn.commit()
+
+
+# --- run events (live activity feed) --------------------------------------
+
+def create_run_event(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    phase: str,
+    kind: str,
+    message: str,
+    detail_json: str | None = None,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO run_events (run_id, ts, phase, kind, message, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, now_iso(), phase, kind, message, detail_json),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_run_events_since(conn: sqlite3.Connection, run_id: int, since_id: int = 0) -> list[sqlite3.Row]:
+    """Every `run_events` row for `run_id` with an id greater than
+    `since_id`, oldest first: the SSE route's replay-then-follow query."""
+    return conn.execute(
+        "SELECT * FROM run_events WHERE run_id = ? AND id > ? ORDER BY id", (run_id, since_id)
+    ).fetchall()
 
 
 # --- dashboard stats ------------------------------------------------------

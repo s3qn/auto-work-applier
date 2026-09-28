@@ -150,6 +150,37 @@ soft instead of raising past the pipeline: `filter_jobs` marks the job
 status `"new"` with reason `"filter failed: ..."`, and `research_company`
 returns a `tldr` of `"unknown (...)"`.
 
+## Live view
+
+`run_scan` (`autojob/pipeline/run.py`) runs in a background thread; the
+dashboard streams what it is doing over Server-Sent Events, which need an
+async route. The two sides never share state directly, only a `run_events`
+table (`autojob/db.py`): one row per granular action (`run_id`, `ts`,
+`phase` one of scan/filter/research/apply/system, `kind` one of
+info/score/progress/error, `message`, `detail` JSON). `autojob/pipeline/
+events.py` holds `emit(conn, run_id, phase, kind, message, detail=None)`,
+called from `run.py` and from inside `llm/filter.py` and `apply/apply.py`
+(both take optional `conn`/`run_id` parameters, `None` outside a pipeline
+run, in which case they stay silent). `emit()` with `kind="progress"` also
+persists `detail` onto the run row (`runs.progress`, a JSON snapshot of
+every phase's done/total plus the running found/filtered/applied counts),
+so a reload with no new events still shows the latest bars.
+`events.bump_progress()` is the read-modify-write helper every phase uses
+to update that snapshot and emit the `progress` event in one call.
+
+`/runs/{id}/live` is a dedicated dark terminal page (not built on the
+normal sidebar layout), connecting to `/runs/{id}/stream`
+(`StreamingResponse`, `text/event-stream`) which replays every existing
+`run_events` row for that run and then polls for new ones every ~500ms
+until `finished_at` is set, at which point it sends a final synthetic
+`"finished"` event and closes. `/runs/{id}/events?since=<id>` is the same
+replay-since-a-cursor query as plain JSON, used as a 1s-poll fallback if
+`EventSource` errors. Both routes sit behind the same login requirement as
+every other page. The run detail page's stat tiles and per-phase progress
+bars (`partials/run_progress_panel.html`) update the same way the run log
+already did: htmx polling `/runs/{id}/progress` every 2s, reading
+`runs.progress`, no SSE needed there.
+
 # Writing style
 
 Applies to everything a human reads: UI copy, code comments, JSDoc, docs and

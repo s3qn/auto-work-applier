@@ -2,15 +2,10 @@
 {% block title %}Run {{ run.id }} - auto-job{% endblock %}
 {% block content %}
 <a href="/runs" class="back-link">&larr; Back to run log</a>
-<h1>Run {{ run.id }}</h1>
+<h1>Run {{ run.id }}<a href="/runs/{{ run.id }}/live" class="live-link">Live &rarr;</a></h1>
 <p class="secondary">
   {{ run.trigger }} started {{ run.started_at }}{% if run.finished_at %}, finished {{ run.finished_at }}{% endif %}
 </p>
-<div class="stat-grid">
-  <div class="stat-tile"><div class="stat-value">{{ run.found }}</div><div class="stat-label">Found</div></div>
-  <div class="stat-tile"><div class="stat-value">{{ run.filtered }}</div><div class="stat-label">Filtered</div></div>
-  <div class="stat-tile"><div class="stat-value">{{ run.applied }}</div><div class="stat-label">Applied</div></div>
-  <div class="stat-tile"><div class="stat-value">{{ run.failed }}</div><div class="stat-label">Failed</div></div>
-</div>
+{% include "partials/run_progress_panel.html" %}
 {% include "partials/run_log_card.html" %}
 {% endblock %}
