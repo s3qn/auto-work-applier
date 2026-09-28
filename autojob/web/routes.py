@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from starlette.responses import PlainTextResponse, RedirectResponse
+from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
 from autojob import auth, db
@@ -16,6 +16,7 @@ from autojob.config import Config
 from autojob.pipeline import run as run_module
 from autojob.web.deps import (
     base_context,
+    get_auto_submit,
     get_config,
     get_db,
     get_limiter,
@@ -30,6 +31,7 @@ router = APIRouter()
 STATUS_CHOICES = ("sent", "replied", "interview", "rejected", "not_interested")
 CV_ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 CV_MAX_BYTES = 10 * 1024 * 1024
+PROOF_MEDIA_TYPES = {".png": "image/png", ".html": "text/html", ".pdf": "application/pdf", ".txt": "text/plain"}
 
 
 def sanitize_filename(name: str) -> str:
@@ -164,6 +166,72 @@ def update_application_notes(
     return RedirectResponse(f"/applications/{application_id}", status_code=303)
 
 
+@router.get("/applications/{application_id}/proofs/{proof_id}")
+def application_proof_file(application_id: int, proof_id: int, conn=Depends(get_db)):
+    """Serves one proof file to the logged-in user only. Never mounted as a
+    static directory: RequireLoginMiddleware guards every route that isn't
+    explicitly public, and this checks the proof actually belongs to the
+    application in the URL before reading anything off disk."""
+    proof_row = db.get_proof(conn, proof_id)
+    if proof_row is None or proof_row["application_id"] != application_id:
+        raise HTTPException(status_code=404, detail="Proof not found.")
+    path = Path(proof_row["path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Proof file is missing on disk.")
+    media_type = PROOF_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=media_type, filename=path.name)
+
+
+def _release_application_and_release_lock(application_id: int, lock: threading.Lock) -> None:
+    from autojob.apply.apply import release_application
+
+    try:
+        release_application(application_id)
+    finally:
+        lock.release()
+
+
+@router.post("/applications/{application_id}/release")
+def application_release(
+    application_id: int,
+    request: Request,
+    csrf_token: str = Form(...),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    application = db.get_application(conn, application_id)
+    if application is None:
+        raise HTTPException(status_code=404, detail="Application not found.")
+    if application["status"] != "ready_to_submit":
+        raise HTTPException(status_code=400, detail="Only a ready-to-submit application can be released.")
+    lock: threading.Lock = request.app.state.run_lock
+    if not lock.acquire(blocking=False):
+        return RedirectResponse(f"/applications/{application_id}?busy=1", status_code=303)
+    thread = threading.Thread(
+        target=_release_application_and_release_lock, args=(application_id, lock), daemon=True
+    )
+    thread.start()
+    return RedirectResponse(f"/applications/{application_id}", status_code=303)
+
+
+@router.post("/applications/{application_id}/discard")
+def application_discard(
+    application_id: int,
+    request: Request,
+    csrf_token: str = Form(...),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    application = db.get_application(conn, application_id)
+    if application is None:
+        raise HTTPException(status_code=404, detail="Application not found.")
+    if application["status"] != "ready_to_submit":
+        raise HTTPException(status_code=400, detail="Only a ready-to-submit application can be discarded.")
+    db.update_application(conn, application_id, status="discarded")
+    db.update_job_status(conn, application["job_id"], "failed")
+    return RedirectResponse("/", status_code=303)
+
+
 # --- jobs found ------------------------------------------------------------
 
 JOB_STATUS_TABS = ("all", "queued", "filtered_out")
@@ -194,6 +262,49 @@ def company_tldr(
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found.")
     return templates.TemplateResponse(request, "partials/company_tldr.html", {"request": request, "company": company})
+
+
+@router.get("/jobs/{job_id}")
+def job_detail(
+    job_id: int,
+    request: Request,
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    job = db.get_job_with_company(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    ctx = base_context(request, conn)
+    ctx["job"] = job
+    ctx["applications"] = [a for a in db.list_applications_with_jobs(conn) if a["job_id"] == job_id]
+    return templates.TemplateResponse(request, "job_detail.html", ctx)
+
+
+def _apply_job_in_background(job, auto_submit: bool) -> None:
+    from autojob.apply.apply import apply_to_job
+
+    try:
+        apply_to_job(job, auto_submit=auto_submit)
+    except Exception:  # noqa: BLE001 - apply_to_job already handles its own failures; last-resort net
+        pass
+
+
+@router.post("/jobs/{job_id}/apply")
+def job_apply_now(
+    job_id: int,
+    request: Request,
+    csrf_token: str = Form(...),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    job = db.get_job_with_company(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    auto_submit = get_auto_submit(conn)
+    thread = threading.Thread(target=_apply_job_in_background, args=(job, auto_submit), daemon=True)
+    thread.start()
+    redirect_to = request.headers.get("referer") or f"/jobs/{job_id}"
+    return RedirectResponse(redirect_to, status_code=303)
 
 
 # --- needs help -----------------------------------------------------------
@@ -292,6 +403,7 @@ def targets_get(
 ):
     ctx = base_context(request, conn)
     ctx["targets"] = get_targets(conn)
+    ctx["auto_submit"] = get_auto_submit(conn)
     ctx["saved"] = False
     return templates.TemplateResponse(request, "targets.html", ctx)
 
@@ -306,6 +418,7 @@ def targets_post(
     priority_companies: str = Form(""),
     daily_cap_per_source: int = Form(20),
     scan_times: str = Form(""),
+    auto_submit: bool = Form(False),
     csrf_token: str = Form(...),
     conn=Depends(get_db),
     templates: Jinja2Templates = Depends(get_templates),
@@ -325,8 +438,10 @@ def targets_post(
         "scan_times": lines(scan_times),
     }
     db.set_setting(conn, "targets", new_targets)
+    db.set_setting(conn, "auto_submit", auto_submit)
     ctx = base_context(request, conn)
     ctx["targets"] = get_targets(conn)
+    ctx["auto_submit"] = get_auto_submit(conn)
     ctx["saved"] = True
     return templates.TemplateResponse(request, "targets.html", ctx)
 

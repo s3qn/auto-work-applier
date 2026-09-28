@@ -19,6 +19,14 @@
   --chip-rejected-text: #8C2B20;
   --chip-not-interested-bg: #ECEAE4;
   --chip-not-interested-text: #5C5F66;
+  --chip-ready-bg: #FDF1DA;
+  --chip-ready-text: #92620B;
+  --chip-needs-help-bg: #FDE9E1;
+  --chip-needs-help-text: #96371B;
+  --chip-failed-bg: #F3E2E2;
+  --chip-failed-text: #7A2C2C;
+  --chip-applying-bg: #EAF0FB;
+  --chip-applying-text: #2C4C8C;
 }
 
 * {
@@ -247,6 +255,43 @@ tr:hover td {
 .chip-new { background: var(--chip-sent-bg); color: var(--chip-sent-text); }
 .chip-queued { background: var(--chip-interview-bg); color: var(--chip-interview-text); }
 .chip-filtered_out { background: var(--chip-not-interested-bg); color: var(--chip-not-interested-text); }
+.chip-ready_to_submit { background: var(--chip-ready-bg); color: var(--chip-ready-text); }
+.chip-needs_help { background: var(--chip-needs-help-bg); color: var(--chip-needs-help-text); }
+.chip-failed { background: var(--chip-failed-bg); color: var(--chip-failed-text); }
+.chip-discarded { background: var(--chip-not-interested-bg); color: var(--chip-not-interested-text); }
+.chip-applying { background: var(--chip-applying-bg); color: var(--chip-applying-text); }
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 4px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: auto;
+}
+
+.field-hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.proof-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.apply-now-form {
+  display: inline;
+}
 
 .tabs {
   display: flex;

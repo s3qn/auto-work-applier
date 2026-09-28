@@ -13,6 +13,7 @@ dependencies = [
     "pypdf>=6.19.0",
     "selectolax>=0.4.12",
     "httpx>=0.27",
+    "playwright>=1.63.0",
 ]
 
 [dependency-groups]

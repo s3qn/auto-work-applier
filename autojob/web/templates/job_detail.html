@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} - auto-job{% endblock %}
+{% block content %}
+<a href="/jobs" class="back-link">&larr; Back to jobs</a>
+<h1>{{ job.title }}</h1>
+<p class="secondary">{{ job.company_name or "Unknown company" }} &middot; {{ job.location or "Location unknown" }}</p>
+
+<div class="card">
+  <h2>Status</h2>
+  <span class="chip chip-{{ job.status }}">{{ job.status.replace('_', ' ') }}</span>
+  {% if job.reason %}<p class="secondary">{{ job.reason }}</p>{% endif %}
+  {% if job.fit_score is not none %}<p class="secondary">Fit score: {{ job.fit_score | round(0) | int }}</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Company</h2>
+  <p>{{ job.company_tldr or "No research yet." }}</p>
+  {% if job.company_careers_url %}
+  <p><a href="{{ job.company_careers_url }}" target="_blank" rel="noopener">Careers page</a></p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Job posting</h2>
+  <p><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.url }}</a></p>
+  <p class="secondary">Source: {{ job.source }}</p>
+  {% if job.description %}<p>{{ job.description }}</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Apply</h2>
+  <form method="post" action="/jobs/{{ job.id }}/apply">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Apply now</button>
+  </form>
+  <p class="field-hint">
+    Runs the apply pipeline for this job in the background: picks a handler for the
+    application URL, fills the form, and either holds it as ready to submit or sends it,
+    depending on the auto-submit setting on the Targets page. Check the Applications page
+    shortly for the result.
+  </p>
+</div>
+
+{% if applications %}
+<div class="card">
+  <h2>Applications for this job</h2>
+  <ul class="proof-list">
+    {% for a in applications %}
+    <li>
+      <a href="/applications/{{ a.id }}">{{ a.channel }} &middot; {{ a.applied_at }}</a>
+      <span class="chip chip-{{ a.status }}">{{ a.status.replace('_', ' ') }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endblock %}

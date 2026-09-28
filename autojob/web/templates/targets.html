@@ -27,6 +27,15 @@
     <label for="scan_times">Scan times, 24 hour HH:MM (one per line)</label>
     <textarea id="scan_times" name="scan_times" rows="2">{{ targets.scan_times | join('\n') }}</textarea>
 
+    <label class="checkbox-label" for="auto_submit">
+      <input type="checkbox" id="auto_submit" name="auto_submit" value="true" {{ 'checked' if auto_submit else '' }}>
+      Submit applications automatically
+    </label>
+    <p class="field-hint">
+      When on, applications are submitted automatically. When off, they are filled and wait for you to
+      release them from the Applications page.
+    </p>
+
     <button type="submit">Save targets</button>
     {% if saved %}<span class="saved-indicator">Saved.</span>{% endif %}
   </form>

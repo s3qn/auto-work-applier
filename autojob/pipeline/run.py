@@ -4,9 +4,12 @@ run_scan() searches the configured job sources for Sean's target
 titles/keywords, dedups against what is already in the database, screens
 the new jobs with the local claude CLI (haiku), researches the companies
 behind the jobs it keeps (sonnet, with web search), and records everything
-so the dashboard can show it. One bad source, one bad job, or one broken
-LLM call never crashes the whole run: everything is caught, logged to the
-run's log, and the run continues.
+so the dashboard can show it. It then sends every currently queued job
+(from this run or a previous one) through the apply pipeline, respecting
+the daily cap per source from the Targets page and the `auto_submit`
+safety default. One bad source, one bad job, one broken LLM call, or one
+failed apply attempt never crashes the whole run: everything is caught,
+logged to the run's log, and the run continues.
 """
 
 from __future__ import annotations
@@ -14,17 +17,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from autojob import db
+from autojob.apply.apply import apply_to_job
 from autojob.config import load_config
 from autojob.llm import filter as llm_filter
 from autojob.llm import research as llm_research
 from autojob.llm.cv import get_cv_text
 from autojob.sources import SourceError, alljobs, jobmaster, linkedin
-from autojob.web.deps import get_targets
+from autojob.web.deps import get_auto_submit, get_targets
 
 MAX_RESEARCH_PER_RUN = 25
 LINKEDIN_MAX_PAGES = 2
 LINKEDIN_MAX_DETAIL_FETCHES = 15
 SOURCES = ("linkedin", "alljobs", "jobmaster")
+DEFAULT_DAILY_CAP_PER_SOURCE = 20
+APPLIED_STATUSES = ("sent", "ready_to_submit")
 
 
 class RunLogger:
@@ -114,6 +120,7 @@ def run_scan(
         logger = RunLogger(conn, run_id)
         found = 0
         filtered = 0
+        applied = 0
         failed = 0
         try:
             targets = get_targets(conn)
@@ -230,14 +237,62 @@ def run_scan(
                 logger.log(f"Researched {researched} compan{'y' if researched == 1 else 'ies'} this run.")
             else:
                 logger.log("Nothing new to filter or research.")
+
+            auto_submit = get_auto_submit(conn)
+            daily_cap = targets.get("daily_cap_per_source") or DEFAULT_DAILY_CAP_PER_SOURCE
+            apply_applied, apply_failed = _run_apply_phase(
+                conn, logger, daily_cap=daily_cap, auto_submit=auto_submit
+            )
+            applied += apply_applied
+            failed += apply_failed
         except Exception as exc:  # noqa: BLE001 - the run must always finish and record something
             logger.log(f"Run failed unexpectedly: {exc}")
             failed += 1
 
-        db.finish_run(conn, run_id, found=found, filtered=filtered, applied=0, failed=failed, log=logger.text)
+        db.finish_run(conn, run_id, found=found, filtered=filtered, applied=applied, failed=failed, log=logger.text)
         return run_id
     finally:
         conn.close()
+
+
+def _run_apply_phase(conn, logger: RunLogger, *, daily_cap: int, auto_submit: bool) -> tuple[int, int]:
+    """Send every currently queued job (found this run or an earlier one)
+    through `apply_to_job`, respecting `daily_cap` applications per source
+    per day. Returns (applied_count, failed_count). One bad job never stops
+    the rest: a crash from `apply_to_job` itself is caught here too, even
+    though `apply_to_job` already catches its own internal failures."""
+    applied = 0
+    failed = 0
+    today_start = f"{db.now_iso()[:10]}T00:00:00Z"
+    sent_today_by_source: dict[str, int] = {}
+    queued_jobs = db.list_jobs_with_company(conn, status="queued")
+    if not queued_jobs:
+        return applied, failed
+
+    logger.log(f"Apply phase: {len(queued_jobs)} job(s) queued, daily cap {daily_cap} per source.")
+    for job in queued_jobs:
+        source = job["source"]
+        if source not in sent_today_by_source:
+            sent_today_by_source[source] = db.count_applications_since(conn, source=source, since_iso=today_start)
+        if sent_today_by_source[source] >= daily_cap:
+            continue
+        try:
+            result = apply_to_job(job, auto_submit=auto_submit)
+        except Exception as exc:  # noqa: BLE001 - one bad job must never stop the apply phase
+            logger.log(f"Apply attempt crashed for job {job['id']} ({job['title']}): {exc}")
+            failed += 1
+            continue
+        status = result.get("status")
+        if status in APPLIED_STATUSES:
+            applied += 1
+            sent_today_by_source[source] = sent_today_by_source[source] + 1
+            logger.log(f"Applied to job {job['id']} ({job['title']}) via {source}: {status}.")
+        elif status == "needs_help":
+            logger.log(f"Job {job['id']} ({job['title']}) needs help: {result.get('reason')}")
+        else:
+            failed += 1
+            logger.log(f"Apply failed for job {job['id']} ({job['title']}): {result.get('reason')}")
+    return applied, failed
 
 
 if __name__ == "__main__":

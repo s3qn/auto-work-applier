@@ -79,35 +79,81 @@ def test_alljobs_looks_relevant_false_for_generic_listing():
     assert alljobs._looks_relevant(jobs, "Penetration Tester") is False
 
 
-def test_alljobs_search_raises_source_error_when_irrelevant(monkeypatch):
-    import httpx
+class _FakePage:
+    def __init__(self, html: str):
+        self._html = html
+        self.goto_calls: list[str] = []
 
+    def goto(self, url, wait_until=None):
+        self.goto_calls.append(url)
+
+    def wait_for_selector(self, selector, timeout=None):
+        return None
+
+    def content(self):
+        return self._html
+
+
+class _FakeBrowserPageContext:
+    def __init__(self, html: str):
+        self.page = _FakePage(html)
+
+    def __enter__(self):
+        return self.page
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_browser_page(monkeypatch, html: str):
+    monkeypatch.setattr(alljobs, "browser_page", lambda config, headless=True: _FakeBrowserPageContext(html))
+    monkeypatch.setattr(alljobs, "_politeness_sleep", lambda: None)
+
+
+def test_alljobs_search_raises_source_error_when_irrelevant(monkeypatch):
     from autojob.sources import SourceError
 
-    class FakeResponse:
-        status_code = 200
-        text = _read("alljobs_search_irrelevant.html")
-
-        def raise_for_status(self):
-            return None
-
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get(self, *a, **k):
-            return FakeResponse()
-
-    monkeypatch.setattr(httpx, "Client", FakeClient)
-    monkeypatch.setattr(alljobs, "_politeness_sleep", lambda: None)
+    _patch_browser_page(monkeypatch, _read("alljobs_search_irrelevant.html"))
     try:
         alljobs.search("Penetration Tester")
         assert False, "expected SourceError"
     except SourceError as exc:
-        assert "ignores the keyword" in str(exc)
+        assert "didn't relate to the keyword" in str(exc)
+
+
+def test_alljobs_search_returns_jobs_through_the_browser(monkeypatch):
+    _patch_browser_page(monkeypatch, _read("alljobs_search_relevant.html"))
+    jobs = alljobs.search("Penetration Tester")
+    assert len(jobs) == 1
+    assert jobs[0]["source"] == "alljobs"
+    assert "Junior Penetration Tester" in jobs[0]["title"]
+
+
+def test_alljobs_search_navigates_to_the_freetxt_url(monkeypatch):
+    pages: list[_FakePage] = []
+
+    def fake_browser_page(config, headless=True):
+        ctx = _FakeBrowserPageContext(_read("alljobs_search_relevant.html"))
+        pages.append(ctx.page)
+        return ctx
+
+    monkeypatch.setattr(alljobs, "browser_page", fake_browser_page)
+    monkeypatch.setattr(alljobs, "_politeness_sleep", lambda: None)
+    alljobs.search("Penetration Tester")
+    assert len(pages) == 1
+    assert "freetxt=Penetration" in pages[0].goto_calls[0]
+
+
+def test_alljobs_search_raises_source_error_when_browser_is_busy(monkeypatch):
+    from autojob.browser.context import BrowserBusyError
+    from autojob.sources import SourceError
+
+    def fake_browser_page(config, headless=True):
+        raise BrowserBusyError("Another browser session is already running. Try again shortly.")
+
+    monkeypatch.setattr(alljobs, "browser_page", fake_browser_page)
+    try:
+        alljobs.search("Penetration Tester")
+        assert False, "expected SourceError"
+    except SourceError as exc:
+        assert "already running" in str(exc)

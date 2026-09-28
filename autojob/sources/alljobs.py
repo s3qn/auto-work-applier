@@ -1,40 +1,53 @@
-"""AllJobs (alljobs.co.il) guest search.
+"""AllJobs (alljobs.co.il) guest search, driven through a real browser.
 
 AllJobs' guest results page (`SearchResultsGuest.aspx`) renders job cards
-server-side, but its free-text search box submits through an ASP.NET
-postback (`__doPostBack` with viewstate), not a plain query string. While
-building this scraper every plausible query parameter name was tried
-(`freetext`, `keyword`, `keywords`, `text`, `q`, `searchtext`) against the
-guest results page and all of them were silently ignored: the page always
-renders the same generic "most recent" listing regardless of the keyword.
+server-side, but free-text search is not a plain query string the way it
+looks: the visible search box is a React (MUI Autocomplete) widget, and
+selecting a suggestion there fires a client-side request that lands on the
+undocumented `freetxt` query parameter (not `freetext`, `keyword`, `q`, or
+any of the other names tried while first building this scraper). Even with
+the right parameter name, a plain HTTP GET (no JS execution) still returns a
+short page with no job cards: the results only render once the page's own
+JavaScript runs. Confirmed live on 2026-09-28: `httpx.get(...,
+params={"freetxt": "Penetration Tester"})` returns a card-less page, while
+loading the same URL in a real (even headless) browser and waiting for
+`div.job-content-top` renders the actual filtered results.
 
-This module still issues the request (`freetext` is the most descriptive
-guess and does no harm), but checks whether the returned cards plausibly
-relate to the keyword. If none do, it raises SourceError so the caller logs
-this source as blocked instead of feeding Sean irrelevant jobs.
+So this module drives Playwright (see `autojob.browser.context`) instead of
+httpx: navigate straight to the results URL with `freetxt` set, wait for the
+job cards to render, then parse the same way the other sources do.
+
+`_looks_relevant` stays as a safety net: if AllJobs' frontend ever changes
+again and search silently falls back to a generic unfiltered listing, this
+still catches it and raises `SourceError` (logged, run continues) instead of
+feeding Sean irrelevant jobs.
 """
 
 from __future__ import annotations
 
-import random
 import re
 import time
+from random import uniform
+from urllib.parse import quote
 
-import httpx
 from selectolax.parser import HTMLParser
 
+from autojob.browser.context import BrowserBusyError, browser_page
+from autojob.config import load_config
 from autojob.sources import SourceError
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-)
 SEARCH_URL = "https://www.alljobs.co.il/SearchResultsGuest.aspx"
-MIN_DELAY = 2.0
-MAX_DELAY = 4.0
+RESULTS_SELECTOR = "div.job-content-top"
+# Matches both the "-highlight" (hot/premium listing) and plain card markup;
+# both were seen live under the same search.
+TITLE_SELECTOR = "div.job-content-top-title-highlight a, div.job-content-top-title a"
+COMPANY_SELECTOR = "div.job-content-top-title-highlight div.T14 a, div.job-content-top-title div.T14 a"
+MIN_DELAY = 1.0
+MAX_DELAY = 2.0
+RESULTS_TIMEOUT_MS = 15_000
 
 
-def _politeness_sleep(sleep=time.sleep, rand=random.uniform) -> None:
+def _politeness_sleep(sleep=time.sleep, rand=uniform) -> None:
     sleep(rand(MIN_DELAY, MAX_DELAY))
 
 
@@ -45,16 +58,17 @@ def _keyword_tokens(keyword: str) -> list[str]:
 def parse_search_page(html: str) -> list[dict]:
     tree = HTMLParser(html)
     jobs: list[dict] = []
-    for card in tree.css("div.job-content-top"):
-        title_node = card.css_first("div.job-content-top-title-highlight a")
+    for card in tree.css(RESULTS_SELECTOR):
+        title_node = card.css_first(TITLE_SELECTOR)
         if title_node is None:
             continue
         href = title_node.attributes.get("href") or ""
         if not href:
             continue
         url = href if href.startswith("http") else f"https://www.alljobs.co.il{href}"
-        company_node = card.css_first("div.job-content-top-title-highlight div.T14 a")
+        company_node = card.css_first(COMPANY_SELECTOR)
         location_node = card.css_first("div.job-content-top-location")
+        description_node = card.css_first("div.job-content-top-desc")
         job_id_match = re.search(r"JobID=(\d+)", href)
         jobs.append(
             {
@@ -65,7 +79,7 @@ def parse_search_page(html: str) -> list[dict]:
                 "location": location_node.text(strip=True).replace("מיקום המשרה:", "").strip()
                 if location_node
                 else "",
-                "description": "",
+                "description": description_node.text(strip=True) if description_node else "",
                 "posted_at": None,
                 "external_id": job_id_match.group(1) if job_id_match else None,
             }
@@ -82,28 +96,37 @@ def _looks_relevant(jobs: list[dict], keyword: str) -> bool:
 
 
 def search(keyword: str) -> list[dict]:
-    """Search AllJobs' guest listing for one keyword.
+    """Search AllJobs' guest listing for one keyword through a real browser.
 
-    Raises SourceError if the site ignores the keyword entirely (see module
-    docstring), which is the observed behavior for guest free-text search.
+    Raises SourceError if the browser can't be reached (already busy, no
+    Chromium installed, navigation failure) or if the results plainly don't
+    relate to the keyword, which is the symptom of the frontend's search
+    breaking again. Both are caught and logged by the pipeline; this source
+    never crashes a run.
     """
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "he-IL,he;q=0.9,en;q=0.8"}
-    params = {"page": "1", "position": "", "type": "", "city": "", "region": "", "freetext": keyword}
+    url = f"{SEARCH_URL}?page=1&position=&type=&freetxt={quote(keyword)}&city=&region="
     try:
-        with httpx.Client(headers=headers, timeout=20.0, follow_redirects=True) as client:
-            response = client.get(SEARCH_URL, params=params)
-            if response.status_code == 429:
-                raise SourceError("alljobs: rate limited (HTTP 429)")
-            response.raise_for_status()
-            jobs = parse_search_page(response.text)
-    except httpx.HTTPError as exc:
-        raise SourceError(f"alljobs: request failed ({exc})") from exc
+        config = load_config()
+        with browser_page(config, headless=True) as page:
+            page.goto(url, wait_until="domcontentloaded")
+            try:
+                page.wait_for_selector(RESULTS_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001 - Playwright's own TimeoutError; zero results is fine
+                pass
+            html = page.content()
+    except BrowserBusyError as exc:
+        raise SourceError(f"alljobs: {exc}") from exc
+    except SourceError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - Playwright can raise many exception types
+        raise SourceError(f"alljobs: browser navigation failed ({exc})") from exc
+
+    jobs = parse_search_page(html)
     if not _looks_relevant(jobs, keyword):
         raise SourceError(
-            "alljobs: guest free-text search ignores the keyword and returns a generic "
-            "listing (confirmed with several query param names). Needs the ASP.NET "
-            "postback the site's search box actually uses, which this scraper doesn't "
-            "implement. Skipping this source."
+            "alljobs: the results page rendered but didn't relate to the keyword "
+            "at all, which is the symptom of AllJobs' frontend search breaking again. "
+            "Skipping this source for this keyword rather than feeding Sean junk."
         )
     _politeness_sleep()
     return jobs

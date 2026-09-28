@@ -12,13 +12,13 @@
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Fit</th><th>Title</th><th>Company</th><th>Source</th><th>Location</th><th>Status</th><th>Reason</th></tr>
+      <tr><th>Fit</th><th>Title</th><th>Company</th><th>Source</th><th>Location</th><th>Status</th><th>Reason</th><th></th></tr>
     </thead>
     <tbody>
       {% for job in jobs %}
       <tr>
         <td>{{ job.fit_score | round(0) | int if job.fit_score is not none else "-" }}</td>
-        <td><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.title }}</a></td>
+        <td><a href="/jobs/{{ job.id }}">{{ job.title }}</a></td>
         <td>
           {% if job.company_id %}
           <button
@@ -35,10 +35,16 @@
         <td>{{ job.location or "-" }}</td>
         <td><span class="chip chip-{{ job.status }}">{{ job.status.replace('_', ' ') }}</span></td>
         <td>{{ job.reason or "-" }}</td>
+        <td>
+          <form method="post" action="/jobs/{{ job.id }}/apply" class="apply-now-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="link-button">Apply now</button>
+          </form>
+        </td>
       </tr>
       {% if job.company_id %}
       <tr class="tldr-row" id="tldr-row-{{ job.id }}">
-        <td colspan="7"><div id="tldr-{{ job.id }}" class="company-tldr">Loading&hellip;</div></td>
+        <td colspan="8"><div id="tldr-{{ job.id }}" class="company-tldr">Loading&hellip;</div></td>
       </tr>
       {% endif %}
       {% endfor %}

@@ -16,11 +16,25 @@
   <p class="secondary">Applied via {{ application.channel }} on {{ application.applied_at }}</p>
 </div>
 
+{% if application.cover_letter %}
+<div class="card">
+  <h2>Cover letter</h2>
+  <p style="white-space: pre-wrap;">{{ application.cover_letter }}</p>
+</div>
+{% endif %}
+
 <div class="card" id="proofs">
   <h2>Proofs</h2>
   {% if proofs %}
-  <ul>
-    {% for p in proofs %}<li>{{ p.kind }} - {{ p.path }} ({{ p.created_at }})</li>{% endfor %}
+  <ul class="proof-list">
+    {% for p in proofs %}
+    <li>
+      <a href="/applications/{{ application.id }}/proofs/{{ p.id }}" target="_blank" rel="noopener">
+        {{ p.kind }} ({{ p.path.split('/')[-1] }})
+      </a>
+      <span class="secondary">{{ p.created_at }}</span>
+    </li>
+    {% endfor %}
   </ul>
   {% else %}
   <p class="empty-state">No proof files yet.</p>
@@ -31,6 +45,18 @@
   <h2>Status</h2>
   {% set status = application.status %}
   <div id="detail-status">{% include "partials/status_chip.html" %}</div>
+  {% if application.status == "ready_to_submit" %}
+  <div class="status-buttons">
+    <form method="post" action="/applications/{{ application.id }}/release">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Release (submit)</button>
+    </form>
+    <form method="post" action="/applications/{{ application.id }}/discard">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Discard</button>
+    </form>
+  </div>
+  {% endif %}
   <div class="status-buttons">
     {% for s in ["sent", "replied", "interview", "rejected", "not_interested"] %}
     <form method="post" action="/applications/{{ application.id }}/status"

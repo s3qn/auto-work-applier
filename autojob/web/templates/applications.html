@@ -13,12 +13,23 @@
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Company</th><th>Role</th><th>Sent via</th><th>When</th><th>Status</th><th>Proof</th></tr>
+      <tr><th>Company</th><th>Role</th><th>Sent via</th><th>When</th><th>Status</th><th>Proof</th><th></th></tr>
     </thead>
     <tbody>
       {% for a in applications %}
       <tr>
-        <td><a class="row-link" href="/applications/{{ a.id }}">{{ a.company_name or "Unknown" }}</a></td>
+        <td>
+          {% if a.company_id %}
+          <button
+            type="button"
+            class="link-button"
+            hx-get="/companies/{{ a.company_id }}/tldr"
+            hx-target="#tldr-{{ a.id }}"
+            hx-swap="innerHTML"
+            hx-on:click="document.getElementById('tldr-row-{{ a.id }}').classList.toggle('show')"
+          >{{ a.company_name or "Unknown" }}</button>
+          {% else %}{{ a.company_name or "Unknown" }}{% endif %}
+        </td>
         <td><a class="row-link" href="/applications/{{ a.id }}">{{ a.job_title }}</a></td>
         <td>{{ a.channel }}</td>
         <td>{{ a.applied_at }}</td>
@@ -28,7 +39,24 @@
           <a href="/applications/{{ a.id }}#proofs">{{ a.proof_count }} file{{ 's' if a.proof_count != 1 else '' }}</a>
           {% else %}-{% endif %}
         </td>
+        <td>
+          {% if a.status == "ready_to_submit" %}
+          <form method="post" action="/applications/{{ a.id }}/release" class="apply-now-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="link-button">Release</button>
+          </form>
+          <form method="post" action="/applications/{{ a.id }}/discard" class="apply-now-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="link-button">Discard</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
+      {% if a.company_id %}
+      <tr class="tldr-row" id="tldr-row-{{ a.id }}">
+        <td colspan="7"><div id="tldr-{{ a.id }}" class="company-tldr">Loading&hellip;</div></td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>

@@ -1,5 +1,5 @@
-"""run_scan orchestration tests. No network and no claude CLI: every source
-and every LLM call is a fake."""
+"""run_scan orchestration tests. No network, no claude CLI, and no real
+browser: every source, every LLM call, and the apply phase are all fakes."""
 
 from __future__ import annotations
 
@@ -35,6 +35,19 @@ def _patch_no_op_research(monkeypatch):
         "research_company",
         lambda name, title, *, work_dir: {"website": None, "tldr": "unused", "careers_url": None},
     )
+
+
+def _patch_no_op_apply(monkeypatch, calls=None):
+    """Stand in for the real apply_to_job, which would otherwise launch a
+    real browser for every queued job. Records calls (job, auto_submit) if
+    a list is given, and never touches the database, so job/application
+    status stays exactly what the filter phase set it to."""
+    def fake_apply_to_job(job, *, auto_submit):
+        if calls is not None:
+            calls.append((job, auto_submit))
+        return {"status": "ready_to_submit", "application_id": None, "reason": None}
+
+    monkeypatch.setattr(run_module, "apply_to_job", fake_apply_to_job)
 
 
 def test_run_scan_with_no_targets_logs_and_finishes(config, monkeypatch):
@@ -73,6 +86,7 @@ def test_run_scan_creates_queued_and_filtered_jobs_and_researches_company(config
         return {"website": "https://acme.example", "tldr": "Acme does security consulting.", "careers_url": None}
 
     monkeypatch.setattr(llm_research, "research_company", fake_research)
+    _patch_no_op_apply(monkeypatch)
 
     run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
 
@@ -107,6 +121,7 @@ def test_run_scan_does_not_resurface_already_seen_jobs(config, monkeypatch):
         ],
     )
     _patch_no_op_research(monkeypatch)
+    _patch_no_op_apply(monkeypatch)
 
     first_run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
     second_run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
@@ -152,6 +167,7 @@ def test_run_scan_never_resurfaces_an_applied_job(config, monkeypatch):
         ],
     )
     _patch_no_op_research(monkeypatch)
+    _patch_no_op_apply(monkeypatch)
 
     run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
     conn = db.get_connection(config)
@@ -182,6 +198,7 @@ def test_run_scan_logs_blocked_source_and_continues(config, monkeypatch):
         ],
     )
     _patch_no_op_research(monkeypatch)
+    _patch_no_op_apply(monkeypatch)
 
     run_id = run_module.run_scan(trigger="manual", keywords=["red team"])
     conn = db.get_connection(config)
@@ -205,6 +222,7 @@ def test_run_scan_filter_failure_leaves_job_new_not_queued(config, monkeypatch):
         ],
     )
     _patch_no_op_research(monkeypatch)
+    _patch_no_op_apply(monkeypatch)
 
     run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
     conn = db.get_connection(config)
@@ -235,6 +253,7 @@ def test_run_scan_respects_research_cap(config, monkeypatch):
         return {"website": None, "tldr": "some tldr", "careers_url": None}
 
     monkeypatch.setattr(llm_research, "research_company", fake_research)
+    _patch_no_op_apply(monkeypatch)
 
     run_id = run_module.run_scan(trigger="manual", keywords=["pentest"], max_research=1)
     conn = db.get_connection(config)
@@ -262,3 +281,88 @@ def test_run_scan_one_bad_source_does_not_crash_the_run(config, monkeypatch):
         conn.close()
     assert run_row["finished_at"] is not None
     assert run_row["failed"] >= 1
+
+
+# --- apply phase --------------------------------------------------------
+# These seed already-queued jobs straight into the database (as if an
+# earlier scan had queued them) and run with keywords=[] so the scan/filter/
+# research portion of run_scan is a no-op: only the apply phase runs.
+
+def _seed_queued_job(config, *, source="linkedin", n=1, title="Penetration Tester", company="Acme"):
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, f"{company}{n}")
+        return db.create_job(
+            conn,
+            source=source,
+            url=f"https://example.com/{source}/{n}",
+            title=title,
+            company_id=company_id,
+            status="queued",
+            dedup_key=db.normalize_dedup_key(f"{company}{n}", title),
+        )
+    finally:
+        conn.close()
+
+
+def test_apply_phase_respects_daily_cap_per_source(config, monkeypatch):
+    for n in range(3):
+        _seed_queued_job(config, source="linkedin", n=n)
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "targets", {"daily_cap_per_source": 2})
+    finally:
+        conn.close()
+
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    run_module.run_scan(trigger="manual", keywords=[])
+
+    assert len(calls) == 2
+
+
+def test_apply_phase_defaults_auto_submit_to_false(config, monkeypatch):
+    _seed_queued_job(config)
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    run_module.run_scan(trigger="manual", keywords=[])
+
+    assert len(calls) == 1
+    _, auto_submit = calls[0]
+    assert auto_submit is False
+
+
+def test_apply_phase_honors_auto_submit_setting_when_enabled(config, monkeypatch):
+    _seed_queued_job(config)
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "auto_submit", True)
+    finally:
+        conn.close()
+
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    run_module.run_scan(trigger="manual", keywords=[])
+
+    assert len(calls) == 1
+    _, auto_submit = calls[0]
+    assert auto_submit is True
+
+
+def test_apply_phase_leaves_queued_jobs_alone_when_nothing_queued(config, monkeypatch):
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    run_id = run_module.run_scan(trigger="manual", keywords=[])
+
+    conn = db.get_connection(config)
+    try:
+        run_row = db.get_run(conn, run_id)
+    finally:
+        conn.close()
+    assert calls == []
+    assert run_row["finished_at"] is not None

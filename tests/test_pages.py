@@ -203,3 +203,211 @@ def test_run_now_records_a_run(client, with_password, config, monkeypatch):
     assert runs, "expected at least one run to be recorded"
     assert runs[0]["trigger"] == "manual"
     assert runs[0]["finished_at"] is not None
+
+
+# --- job detail and apply now --------------------------------------------
+
+def test_job_detail_page_renders(client, with_password, config):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="linkedin", url="https://example.com/job", title="Junior Pentester",
+            company_id=company_id, status="queued",
+        )
+    finally:
+        conn.close()
+
+    response = client.get(f"/jobs/{job_id}")
+    assert response.status_code == 200
+    assert "Junior Pentester" in response.text
+    assert "Apply now" in response.text
+
+
+def test_job_apply_now_runs_apply_to_job_in_background(client, with_password, config, monkeypatch):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="linkedin", url="https://example.com/job", title="Junior Pentester",
+            company_id=company_id, status="queued",
+        )
+    finally:
+        conn.close()
+
+    calls = []
+
+    def fake_apply_to_job(job, *, auto_submit):
+        calls.append((job["id"], auto_submit))
+        return {"status": "ready_to_submit", "application_id": None, "reason": None}
+
+    monkeypatch.setattr("autojob.apply.apply.apply_to_job", fake_apply_to_job)
+
+    token = get_csrf_token(client, f"/jobs/{job_id}")
+    response = client.post(f"/jobs/{job_id}/apply", data={"csrf_token": token}, follow_redirects=False)
+    assert response.status_code == 303
+
+    for _ in range(40):
+        if calls:
+            break
+        time.sleep(0.05)
+    assert calls == [(job_id, False)]  # auto_submit defaults to off
+
+
+# --- targets: auto_submit toggle ------------------------------------------
+
+def test_targets_page_shows_auto_submit_explanation_and_defaults_off(client, with_password):
+    login(client, with_password)
+    response = client.get("/targets")
+    assert response.status_code == 200
+    assert "auto_submit" in response.text
+    assert "submitted automatically" in response.text
+    assert 'name="auto_submit" value="true" ' in response.text  # unchecked: no "checked" right after
+
+
+def test_targets_save_enables_auto_submit(client, with_password, config):
+    login(client, with_password)
+    token = get_csrf_token(client, "/targets")
+    response = client.post(
+        "/targets",
+        data={
+            "titles": "Pentester", "locations": "Israel", "max_years": "3",
+            "excluded_companies": "", "priority_companies": "", "daily_cap_per_source": "10",
+            "scan_times": "", "auto_submit": "true", "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+
+    from autojob import db
+    from autojob.web.deps import get_auto_submit
+
+    conn = db.get_connection(config)
+    try:
+        assert get_auto_submit(conn) is True
+    finally:
+        conn.close()
+
+    reload_response = client.get("/targets")
+    assert 'name="auto_submit" value="true" checked' in reload_response.text
+
+
+# --- application release / discard / proof files ---------------------------
+
+def _seed_ready_to_submit_application(config):
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="manual", url="https://example.com/job", title="Pentester",
+            company_id=company_id, status="applying",
+        )
+        application_id = db.create_application(conn, job_id=job_id, channel="greenhouse", status="ready_to_submit")
+    finally:
+        conn.close()
+    return job_id, application_id
+
+
+def test_application_discard_marks_discarded_and_fails_the_job(client, with_password, config):
+    login(client, with_password)
+    job_id, application_id = _seed_ready_to_submit_application(config)
+
+    token = get_csrf_token(client, f"/applications/{application_id}")
+    response = client.post(
+        f"/applications/{application_id}/discard", data={"csrf_token": token}, follow_redirects=False
+    )
+    assert response.status_code == 303
+
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        application = db.get_application(conn, application_id)
+        job = db.get_job(conn, job_id)
+    finally:
+        conn.close()
+    assert application["status"] == "discarded"
+    assert job["status"] == "failed"
+
+
+def test_application_discard_rejects_non_ready_application(client, with_password, config):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="manual", url="https://example.com/job2", title="Pentester",
+            company_id=company_id, status="applied",
+        )
+        application_id = db.create_application(conn, job_id=job_id, channel="greenhouse", status="sent")
+    finally:
+        conn.close()
+
+    token = get_csrf_token(client, f"/applications/{application_id}")
+    response = client.post(
+        f"/applications/{application_id}/discard", data={"csrf_token": token}, follow_redirects=False
+    )
+    assert response.status_code == 400
+
+
+def test_application_release_runs_release_application_in_background(client, with_password, config, monkeypatch):
+    login(client, with_password)
+    job_id, application_id = _seed_ready_to_submit_application(config)
+
+    calls = []
+    monkeypatch.setattr(
+        "autojob.apply.apply.release_application",
+        lambda app_id: calls.append(app_id) or {"status": "sent", "reason": None},
+    )
+
+    token = get_csrf_token(client, f"/applications/{application_id}")
+    response = client.post(
+        f"/applications/{application_id}/release", data={"csrf_token": token}, follow_redirects=False
+    )
+    assert response.status_code == 303
+
+    for _ in range(40):
+        if calls:
+            break
+        time.sleep(0.05)
+    assert calls == [application_id]
+
+
+def test_proof_file_is_served_only_to_logged_in_user(client, with_password, config):
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="manual", url="https://example.com/job3", title="Pentester", company_id=company_id
+        )
+        application_id = db.create_application(conn, job_id=job_id, channel="greenhouse", status="sent")
+        proof_path = config.data_dir / "applications" / str(application_id)
+        proof_path.mkdir(parents=True, exist_ok=True)
+        file_path = proof_path / "form.png"
+        file_path.write_bytes(b"fake png bytes")
+        proof_id = db.create_proof(conn, application_id=application_id, kind="screenshot", path=str(file_path))
+    finally:
+        conn.close()
+
+    # Not logged in: redirected to login, never served the file.
+    anon_response = client.get(f"/applications/{application_id}/proofs/{proof_id}", follow_redirects=False)
+    assert anon_response.status_code == 303
+    assert anon_response.headers["location"] == "/login"
+
+    login(client, with_password)
+    response = client.get(f"/applications/{application_id}/proofs/{proof_id}")
+    assert response.status_code == 200
+    assert response.content == b"fake png bytes"
+    assert response.headers["content-type"] == "image/png"

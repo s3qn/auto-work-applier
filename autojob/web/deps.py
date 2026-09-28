@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 from starlette.templating import Jinja2Templates
 
 from autojob import auth, db
+from autojob.apply.answers import seed_answer_bank
 from autojob.config import Config
 
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
@@ -95,6 +96,23 @@ def get_profile_answers(conn: sqlite3.Connection) -> dict:
     if stored:
         merged.update(stored)
     return merged
+
+
+def get_answer_bank(conn: sqlite3.Connection) -> dict:
+    """The reusable answer bank for recurring questions (years of
+    experience, visa sponsorship, relocation, salary), seeded from the
+    profile so the same question gets the same honest answer everywhere."""
+    stored = db.get_setting(conn, "answer_bank")
+    merged = seed_answer_bank(get_profile_answers(conn))
+    if stored:
+        merged.update(stored)
+    return merged
+
+
+def get_auto_submit(conn: sqlite3.Connection) -> bool:
+    """The safety default: applications are filled and held as
+    ready_to_submit unless this is explicitly turned on."""
+    return bool(db.get_setting(conn, "auto_submit", False))
 
 
 def next_scan_display(conn: sqlite3.Connection) -> str:
