@@ -10,9 +10,77 @@ from tests.conftest import get_csrf_token, login
 
 def test_all_pages_render_when_empty(client, with_password):
     login(client, with_password)
-    for path in ["/", "/needs-help", "/submit", "/targets", "/runs", "/profile"]:
+    for path in ["/", "/jobs", "/needs-help", "/submit", "/targets", "/runs", "/profile"]:
         response = client.get(path)
         assert response.status_code == 200, f"{path} returned {response.status_code}"
+
+
+def test_jobs_page_lists_jobs_and_filters_by_status(client, with_password, config):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        db.create_job(
+            conn, source="linkedin", url="https://example.com/a", title="Pentester",
+            company_id=company_id, status="queued", fit_score=8.0, reason="good fit",
+        )
+        db.create_job(
+            conn, source="linkedin", url="https://example.com/b", title="Sales Rep",
+            company_id=company_id, status="filtered_out", fit_score=1.0, reason="not security",
+        )
+    finally:
+        conn.close()
+
+    response = client.get("/jobs")
+    assert response.status_code == 200
+    assert "Pentester" in response.text
+    assert "Sales Rep" in response.text
+
+    queued_only = client.get("/jobs?status=queued")
+    assert "Pentester" in queued_only.text
+    assert "Sales Rep" not in queued_only.text
+
+    filtered_only = client.get("/jobs?status=filtered_out")
+    assert "Sales Rep" in filtered_only.text
+    assert "Pentester" not in filtered_only.text
+
+
+def test_company_tldr_partial_renders(client, with_password, config):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        db.update_company_research(
+            conn, company_id, website="https://acme.example", tldr="Acme does security consulting.",
+            careers_url="https://acme.example/careers",
+        )
+    finally:
+        conn.close()
+
+    response = client.get(f"/companies/{company_id}/tldr")
+    assert response.status_code == 200
+    assert "Acme does security consulting." in response.text
+    assert "https://acme.example" in response.text
+
+
+def test_found_today_stat_counts_jobs_found_today(client, with_password, config):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        db.create_job(conn, source="manual", url="https://example.com/x", title="Pentester")
+    finally:
+        conn.close()
+
+    response = client.get("/")
+    assert response.status_code == 200
+    stats_html = response.text
+    assert "Found today" in stats_html
 
 
 def test_applications_empty_state(client, with_password):
@@ -105,7 +173,15 @@ def test_cv_upload_accepts_pdf(client, with_password):
     assert "resume.pdf" in response.text
 
 
-def test_run_now_records_a_run(client, with_password, config):
+def test_run_now_records_a_run(client, with_password, config, monkeypatch):
+    # /runs/now runs the real pipeline in a background thread. Stub out the
+    # sources so this test stays fast and touches no network or claude CLI.
+    from autojob.sources import alljobs, jobmaster, linkedin
+
+    monkeypatch.setattr(linkedin, "search", lambda keyword, **kw: [])
+    monkeypatch.setattr(alljobs, "search", lambda keyword: [])
+    monkeypatch.setattr(jobmaster, "search", lambda keyword: [])
+
     login(client, with_password)
     token = get_csrf_token(client, "/runs")
     response = client.post("/runs/now", data={"csrf_token": token}, follow_redirects=False)

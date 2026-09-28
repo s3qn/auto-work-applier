@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Jobs found - auto-job{% endblock %}
+{% block content %}
+<h1>Jobs found</h1>
+<div class="tabs">
+  <a class="tab {{ 'active' if status == 'all' else '' }}" href="/jobs">All</a>
+  <a class="tab {{ 'active' if status == 'queued' else '' }}" href="/jobs?status=queued">Queued</a>
+  <a class="tab {{ 'active' if status == 'filtered_out' else '' }}" href="/jobs?status=filtered_out">Filtered out</a>
+</div>
+<div class="card table-card">
+  {% if jobs %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Fit</th><th>Title</th><th>Company</th><th>Source</th><th>Location</th><th>Status</th><th>Reason</th></tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td>{{ job.fit_score | round(0) | int if job.fit_score is not none else "-" }}</td>
+        <td><a href="{{ job.url }}" target="_blank" rel="noopener">{{ job.title }}</a></td>
+        <td>
+          {% if job.company_id %}
+          <button
+            type="button"
+            class="link-button"
+            hx-get="/companies/{{ job.company_id }}/tldr"
+            hx-target="#tldr-{{ job.id }}"
+            hx-swap="innerHTML"
+            hx-on:click="document.getElementById('tldr-row-{{ job.id }}').classList.toggle('show')"
+          >{{ job.company_name or "Unknown" }}</button>
+          {% else %}{{ job.company_name or "Unknown" }}{% endif %}
+        </td>
+        <td>{{ job.source }}</td>
+        <td>{{ job.location or "-" }}</td>
+        <td><span class="chip chip-{{ job.status }}">{{ job.status.replace('_', ' ') }}</span></td>
+        <td>{{ job.reason or "-" }}</td>
+      </tr>
+      {% if job.company_id %}
+      <tr class="tldr-row" id="tldr-row-{{ job.id }}">
+        <td colspan="7"><div id="tldr-{{ job.id }}" class="company-tldr">Loading&hellip;</div></td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty-state">No jobs found yet. Run a scan to get started.</p>
+  {% endif %}
+</div>
+{% endblock %}

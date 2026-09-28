@@ -164,6 +164,38 @@ def update_application_notes(
     return RedirectResponse(f"/applications/{application_id}", status_code=303)
 
 
+# --- jobs found ------------------------------------------------------------
+
+JOB_STATUS_TABS = ("all", "queued", "filtered_out")
+
+
+@router.get("/jobs")
+def jobs_list(
+    request: Request,
+    status: str = "all",
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    ctx = base_context(request, conn)
+    status_filter = status if status in ("queued", "filtered_out") else None
+    ctx["jobs"] = db.list_jobs_with_company(conn, status=status_filter)
+    ctx["status"] = status if status in JOB_STATUS_TABS else "all"
+    return templates.TemplateResponse(request, "jobs.html", ctx)
+
+
+@router.get("/companies/{company_id}/tldr")
+def company_tldr(
+    company_id: int,
+    request: Request,
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    company = db.get_company(conn, company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found.")
+    return templates.TemplateResponse(request, "partials/company_tldr.html", {"request": request, "company": company})
+
+
 # --- needs help -----------------------------------------------------------
 
 @router.get("/needs-help")
@@ -325,6 +357,19 @@ def run_detail(
     ctx = base_context(request, conn)
     ctx["run"] = run_row
     return templates.TemplateResponse(request, "run_detail.html", ctx)
+
+
+@router.get("/runs/{run_id}/log")
+def run_log_partial(
+    run_id: int,
+    request: Request,
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    run_row = db.get_run(conn, run_id)
+    if run_row is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return templates.TemplateResponse(request, "partials/run_log_card.html", {"request": request, "run": run_row})
 
 
 def _run_scan_and_release(lock: threading.Lock) -> None:

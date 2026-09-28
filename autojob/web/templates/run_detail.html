@@ -12,8 +12,5 @@
   <div class="stat-tile"><div class="stat-value">{{ run.applied }}</div><div class="stat-label">Applied</div></div>
   <div class="stat-tile"><div class="stat-value">{{ run.failed }}</div><div class="stat-label">Failed</div></div>
 </div>
-<div class="card">
-  <h2>Log</h2>
-  <pre class="run-log">{{ run.log or "No log yet." }}</pre>
-</div>
+{% include "partials/run_log_card.html" %}
 {% endblock %}

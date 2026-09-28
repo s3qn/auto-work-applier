@@ -21,6 +21,7 @@
       <div class="brand-full">auto-job</div>
       <ul class="nav-list">
         <li><a class="{{ 'active' if active_section == 'applications' else '' }}" href="/">Applications</a></li>
+        <li><a class="{{ 'active' if active_section == 'jobs' else '' }}" href="/jobs">Jobs found</a></li>
         <li>
           <a class="{{ 'active' if active_section == 'needs_help' else '' }}" href="/needs-help">
             Needs help{% if needs_help_count > 0 %} <span class="badge">{{ needs_help_count }}</span>{% endif %}

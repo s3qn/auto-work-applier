@@ -1,0 +1,5 @@
+<div class="card" id="run-log-card"
+     {% if not run.finished_at %}hx-get="/runs/{{ run.id }}/log" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  <h2>Log</h2>
+  <pre class="run-log">{{ run.log or "No log yet." }}</pre>
+</div>

@@ -1,0 +1,2 @@
+<p><strong>{{ company.name }}</strong>{% if company.website %} &middot; <a href="{{ company.website }}" target="_blank" rel="noopener">website</a>{% endif %}{% if company.careers_url %} &middot; <a href="{{ company.careers_url }}" target="_blank" rel="noopener">careers page</a>{% endif %}</p>
+<p>{{ company.tldr or "Not researched yet." }}</p>

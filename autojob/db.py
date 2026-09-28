@@ -119,8 +119,26 @@ def init_db(config: Config) -> None:
     try:
         conn.executescript(SCHEMA)
         conn.commit()
+        migrate_schema(conn)
     finally:
         conn.close()
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the original schema, safe to run on an
+    existing database: every ALTER TABLE is guarded by a PRAGMA table_info
+    check so it never runs twice."""
+    if not _column_exists(conn, "jobs", "reason"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN reason TEXT")
+    if not _column_exists(conn, "jobs", "external_id"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN external_id TEXT")
+    if not _column_exists(conn, "companies", "careers_url"):
+        conn.execute("ALTER TABLE companies ADD COLUMN careers_url TEXT")
+    conn.commit()
 
 
 # --- settings -----------------------------------------------------------
@@ -159,6 +177,25 @@ def get_company(conn: sqlite3.Connection, company_id: int) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM companies WHERE id = ?", (company_id,)).fetchone()
 
 
+def get_company_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM companies WHERE name = ?", (name,)).fetchone()
+
+
+def update_company_research(
+    conn: sqlite3.Connection,
+    company_id: int,
+    *,
+    website: str | None,
+    tldr: str,
+    careers_url: str | None,
+) -> None:
+    conn.execute(
+        "UPDATE companies SET website = ?, tldr = ?, careers_url = ?, researched_at = ? WHERE id = ?",
+        (website, tldr, careers_url, now_iso(), company_id),
+    )
+    conn.commit()
+
+
 # --- jobs -------------------------------------------------------------
 
 def create_job(
@@ -172,6 +209,8 @@ def create_job(
     description: str | None = None,
     status: str = "new",
     fit_score: float | None = None,
+    reason: str | None = None,
+    external_id: str | None = None,
     dedup_key: str | None = None,
 ) -> int | None:
     """Insert a job. Returns the new job id, or None if the dedup key already exists."""
@@ -179,8 +218,12 @@ def create_job(
     try:
         cur = conn.execute(
             "INSERT INTO jobs (source, url, title, company_id, location, description, "
-            "found_at, fit_score, status, dedup_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (source, url, title, company_id, location, description, now_iso(), fit_score, status, key),
+            "found_at, fit_score, status, dedup_key, reason, external_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                source, url, title, company_id, location, description,
+                now_iso(), fit_score, status, key, reason, external_id,
+            ),
         )
     except sqlite3.IntegrityError:
         return None
@@ -190,6 +233,31 @@ def create_job(
 
 def get_job(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+
+
+def get_job_with_company(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT jobs.*, companies.name AS company_name, companies.website AS company_website,
+               companies.tldr AS company_tldr, companies.careers_url AS company_careers_url
+        FROM jobs
+        LEFT JOIN companies ON companies.id = jobs.company_id
+        WHERE jobs.id = ?
+        """,
+        (job_id,),
+    ).fetchone()
+
+
+def job_url_exists(conn: sqlite3.Connection, url: str) -> bool:
+    row = conn.execute("SELECT id FROM jobs WHERE url = ?", (url,)).fetchone()
+    return row is not None
+
+
+def job_external_id_exists(conn: sqlite3.Connection, source: str, external_id: str) -> bool:
+    row = conn.execute(
+        "SELECT id FROM jobs WHERE source = ? AND external_id = ?", (source, external_id)
+    ).fetchone()
+    return row is not None
 
 
 def list_jobs(conn: sqlite3.Connection, *, source: str | None = None, status: str | None = None) -> list[sqlite3.Row]:
@@ -205,8 +273,32 @@ def list_jobs(conn: sqlite3.Connection, *, source: str | None = None, status: st
     return conn.execute(query, params).fetchall()
 
 
+def list_jobs_with_company(conn: sqlite3.Connection, *, status: str | None = None) -> list[sqlite3.Row]:
+    query = (
+        "SELECT jobs.*, companies.name AS company_name, companies.tldr AS company_tldr, "
+        "companies.website AS company_website, companies.careers_url AS company_careers_url "
+        "FROM jobs LEFT JOIN companies ON companies.id = jobs.company_id WHERE 1=1"
+    )
+    params: list = []
+    if status is not None:
+        query += " AND jobs.status = ?"
+        params.append(status)
+    query += " ORDER BY jobs.found_at DESC"
+    return conn.execute(query, params).fetchall()
+
+
 def update_job_status(conn: sqlite3.Connection, job_id: int, status: str) -> None:
     conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+    conn.commit()
+
+
+def set_job_filter_result(
+    conn: sqlite3.Connection, job_id: int, *, status: str, fit_score: float | None, reason: str
+) -> None:
+    conn.execute(
+        "UPDATE jobs SET status = ?, fit_score = ?, reason = ? WHERE id = ?",
+        (status, fit_score, reason, job_id),
+    )
     conn.commit()
 
 
@@ -337,6 +429,13 @@ def create_run(conn: sqlite3.Connection, *, trigger: str) -> int:
     )
     conn.commit()
     return cur.lastrowid
+
+
+def update_run_log(conn: sqlite3.Connection, run_id: int, log: str) -> None:
+    """Persist the log so far for a run still in progress, so the run detail
+    page can poll and show live progress."""
+    conn.execute("UPDATE runs SET log = ? WHERE id = ?", (log, run_id))
+    conn.commit()
 
 
 def finish_run(

@@ -122,6 +122,8 @@ def next_scan_display(conn: sqlite3.Connection) -> str:
 def active_section(path: str) -> str:
     if path == "/" or path.startswith("/applications"):
         return "applications"
+    if path.startswith("/jobs"):
+        return "jobs"
     if path.startswith("/needs-help") or path.startswith("/help"):
         return "needs_help"
     if path.startswith("/submit"):

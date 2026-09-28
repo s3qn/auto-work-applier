@@ -15,13 +15,57 @@ Commands:
 - `uv run python -m autojob.set_password` sets the single login password.
 
 Data lives under `AUTOJOB_DATA_DIR` (default `<repo>/data`, gitignored):
-the SQLite database, `auth.json`, the session `secret_key`, and uploaded CV
-files under `data/cv/`. Tests always point `AUTOJOB_DATA_DIR` at a temp
-directory and never touch the real one.
+the SQLite database, `auth.json`, the session `secret_key`, uploaded CV
+files under `data/cv/`, and a throwaway `data/llm-work/` used as the `cwd`
+for every claude CLI call (see below). Tests always point
+`AUTOJOB_DATA_DIR` at a temp directory and never touch the real one.
 
 The agents in `.claude/agents/` and the feature-dev scripts still describe
 the shadowing-app stack (Expo client, FastAPI backend on :8020, phone QR
 tunnel) and need adapting to match auto-job.
+
+## Sources
+
+`autojob/sources/` scrapes job postings with httpx + selectolax, no
+accounts or logins:
+- `linkedin.py`: the public guest job search
+  (`jobs-guest/jobs/api/seeMoreJobPostings/search`) and detail
+  (`jobs-guest/jobs/api/jobPosting/<id>`) endpoints. Confirmed working with a
+  desktop User-Agent and a 2 to 4s delay between requests.
+- `jobmaster.py`: the guest listing at `/jobs/q-<slugified keyword>/`
+  (**not** a `?freetext=` query string, which the site ignores). Anonymous
+  users only see the first page.
+- `alljobs.py`: attempts `SearchResultsGuest.aspx?freetext=...`, but the
+  site's free-text search actually runs through an ASP.NET postback the
+  guest page ignores over a plain GET (every plausible query param name was
+  tried and confirmed ignored). This source checks whether the results look
+  related to the keyword and raises `SourceError` (logged, run continues)
+  when they clearly don't.
+
+Every source module returns normalized job dicts (`source`, `url`, `title`,
+`company`, `location`, `description`, `posted_at`, `external_id`) and
+raises `autojob.sources.SourceError` on a blocked or broken request, never
+a bare exception, so `pipeline/run.py` can log it and keep going with the
+other sources.
+
+## claude CLI usage
+
+Filtering (`autojob/llm/filter.py`, haiku) and company research
+(`autojob/llm/research.py`, sonnet, with `WebSearch`/`WebFetch` allowed) both
+call the local `claude` CLI through `autojob/llm/cli.py`, no API key:
+`claude -p --model <model> --output-format json`, prompt on stdin, JSON
+parsed out of the response's `"result"` field.
+
+**Every call sets `cwd` to `data/llm-work/`** (created on demand), never
+this repo. Running from the repo root would load this repo's own
+`CLAUDE.md`, `AGENTS.md`, and `.claude/` hooks into the CLI's context,
+which would corrupt the job-screening and company-research prompts. Any
+new claude CLI caller must follow the same rule.
+
+On a timeout, non-JSON output, or malformed response, both callers fail
+soft instead of raising past the pipeline: `filter_jobs` marks the job
+status `"new"` with reason `"filter failed: ..."`, and `research_company`
+returns a `tldr` of `"unknown (...)"`.
 
 # Writing style
 

@@ -244,6 +244,47 @@ tr:hover td {
 .chip-interview { background: var(--chip-interview-bg); color: var(--chip-interview-text); }
 .chip-rejected { background: var(--chip-rejected-bg); color: var(--chip-rejected-text); }
 .chip-not_interested { background: var(--chip-not-interested-bg); color: var(--chip-not-interested-text); }
+.chip-new { background: var(--chip-sent-bg); color: var(--chip-sent-text); }
+.chip-queued { background: var(--chip-interview-bg); color: var(--chip-interview-text); }
+.chip-filtered_out { background: var(--chip-not-interested-bg); color: var(--chip-not-interested-text); }
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.tab {
+  padding: 8px 14px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.tab:hover {
+  background: #F1EFEA;
+}
+
+.tab.active {
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--card-border);
+}
+
+.tldr-row {
+  display: none;
+}
+
+.tldr-row.show {
+  display: table-row;
+}
+
+.company-tldr {
+  padding: 8px 4px;
+  white-space: normal;
+}
 
 .empty-state {
   color: var(--text-secondary);
