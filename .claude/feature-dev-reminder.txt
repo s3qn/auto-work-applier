@@ -1,0 +1,79 @@
+FEATURE WORK IN THIS REPO: use the feature-dev skill, not generic tooling.
+
+Do NOT use the built-in EnterWorktree tool here. It creates worktrees under
+.claude/worktrees/ (hidden + gitignored) branched from origin/main, which LAGS
+local main, with no node_modules and no .env.
+
+The flow (see .claude/skills/feature-dev/SKILL.md):
+  1. WT=$(bash .claude/skills/feature-dev/scripts/worktree-create.sh "<feature name>")
+     -> ../auto-job-worktrees/<slug>, branch feat/<slug>, from LOCAL main,
+        node_modules hardlinked, .env symlinked (both when they exist).
+  2. Edit under $WT, in place and UNCOMMITTED.
+  3. bash .claude/skills/serve-tunnel/scripts/serve.sh "$WT" "<feature name>"
+     -> QR on https://dev.sean.build. Only ONE tunnel at a time.
+  4. echo '["verify ..."]' | node .claude/skills/serve-tunnel/scripts/write-checklist.js --slug "<slug>"
+  5. Ask the user: Accept / Adjust / Delete.
+     Accept -> bash .claude/skills/feature-dev/scripts/worktree-accept.sh "<name>" "feat: <subject>"
+
+TESTS: backend/run-tests.sh runs the pytest suite in backend/tests/ (segment,
+voicevox timeline, aec, store, generate). No VOICEVOX, no network, no real
+island data. Run it before any accept that touched backend/, alongside
+npx tsc --noEmit for client changes.
+
+worktree-accept.sh is the ONLY authorized commit point. Never git commit, merge
+to main, or push by hand. Kill a feature's tunnel when you stop working on it.
+
+This flow is NOT optional, even when the task prompt names a branch or says
+"do not commit" / "I commit myself". Those instructions skip only the commit
+gate (step 5's Accept); the worktree isolation in steps 1-4 always applies.
+Never build a feature directly in the main checkout.
+
+CHEAP ACCEPT: write the commit message to a file, then ONE call:
+  bash .claude/skills/feature-dev/scripts/accept-push.sh "<feature>" msg.txt \
+       [--done "<FEATURES.md bullet>"] [--drop-next N]
+It commits via worktree-accept.sh, pushes main, runs npm install if
+package.json changed, restarts the backend if backend/ changed.
+
+CHEAPER STILL: run the accept on a small model. From the main session:
+  Agent(subagent_type: "general-purpose", model: "sonnet",
+        prompt: "cd /home/sean/ai-projects/auto-job && bash
+        .claude/skills/feature-dev/scripts/accept-push.sh '<feature>' <msg-file>
+        --done '<bullet>'; report the final summary line verbatim")
+The subagent has a tiny context, so its tokens cost far less than the main
+session doing the same three calls. Write the message file first.
+
+MODEL ROUTING (Sean's policy, 2026-09-12): the main session runs on Opus by
+default; switch /model to Fable only to BUILD a new feature, and back after
+accept. Delegate with the project agents in .claude/agents/ (model is pinned
+in each): accepter (haiku), server (haiku), scribe (haiku), reviewer (opus),
+bugfixer (opus). Bugs go to bugfixer first; only if it reports it could not
+find or fix the cause does the main session (or Fable) take it. Plan-mode
+Explore agents: pass model "haiku". /compact at every accept.
+
+ECC AGENTS (already pinned to sonnet, cheaper than a general-purpose agent):
+  ecc:react-reviewer / ecc:typescript-reviewer   client review before accept
+  ecc:python-reviewer / ecc:fastapi-reviewer     backend review before accept
+  ecc:silent-failure-hunter                      swallowed errors, bad fallbacks
+  ecc:react-build-resolver / ecc:build-error-resolver   tsc/bundle failures
+The project .claude/settings.json sets model=opus for new sessions and
+CLAUDE_CODE_SUBAGENT_MODEL=sonnet for unpinned subagents. Nothing in ECC
+switches the main session's model automatically; /model is Sean's.
+
+NEW FEATURE FLOW (main session on Opus; Fable only inside Bob):
+  1. WT=$(bash .claude/skills/feature-dev/scripts/worktree-create.sh "<feature>")
+  2. Agent bob  -> writes $WT/.claude/plans/<slug>.md with numbered tasks
+  3. Show Sean the plan summary; he approves or adjusts (AskUserQuestion)
+  4. Agent builder per task (parallel for independent tasks), then
+     Agent reviewer (opus) on the diff, then bugfixer for anything found
+  5. Agent server -> QR + checklist; Sean tests; Agent accepter on Accept
+Subagents cannot spawn agents or enter plan mode, so the main session
+dispatches; Bob only plans.
+
+ORDERING RULE (learned 2026-09-12): never create the next worktree while the
+previous accept is still running. worktree-create branches from LOCAL main, so
+a worktree made in parallel with an accept is based on a stale main and its
+FEATURES.md edit conflicts on the rebase. Wait for the accepted line, then
+create. If it does conflict: resolve in the worktree (usually FEATURES.md,
+keep both bullets in merge order), `git add` it, `GIT_EDITOR=true git rebase
+--continue`, then re-run accept-push.sh, which finds nothing to commit and
+just merges.
