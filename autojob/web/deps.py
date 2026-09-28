@@ -115,6 +115,17 @@ def get_auto_submit(conn: sqlite3.Connection) -> bool:
     return bool(db.get_setting(conn, "auto_submit", False))
 
 
+def get_email_daily_cap(conn: sqlite3.Connection) -> int:
+    """Cap on how many application emails go out per day, across every
+    company (Sean's own outbox rate limit, not a per-source cap). Edited on
+    the Targets page."""
+    stored = db.get_setting(conn, "email_daily_cap", 15)
+    try:
+        return int(stored)
+    except (TypeError, ValueError):
+        return 15
+
+
 def next_scan_display(conn: sqlite3.Connection) -> str:
     targets = get_targets(conn)
     scan_times = targets.get("scan_times") or DEFAULT_TARGETS["scan_times"]

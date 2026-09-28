@@ -36,6 +36,10 @@
       release them from the Applications page.
     </p>
 
+    <label for="email_daily_cap">Daily email cap</label>
+    <input type="number" id="email_daily_cap" name="email_daily_cap" min="0" value="{{ email_daily_cap }}">
+    <p class="field-hint">{{ smtp_status }}</p>
+
     <button type="submit">Save targets</button>
     {% if saved %}<span class="saved-indicator">Saved.</span>{% endif %}
   </form>

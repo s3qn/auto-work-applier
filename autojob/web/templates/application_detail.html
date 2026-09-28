@@ -23,6 +23,16 @@
 </div>
 {% endif %}
 
+{% if email_draft %}
+<div class="card">
+  <h2>Email</h2>
+  <p><strong>To:</strong> {{ email_draft.to }}</p>
+  <p><strong>Subject:</strong> {{ email_draft.subject }}</p>
+  <p><strong>Attachment:</strong> {{ email_draft.attachment_name or "none" }}</p>
+  <p style="white-space: pre-wrap;">{{ email_draft.body }}</p>
+</div>
+{% endif %}
+
 <div class="card" id="proofs">
   <h2>Proofs</h2>
   {% if proofs %}
@@ -49,7 +59,7 @@
   <div class="status-buttons">
     <form method="post" action="/applications/{{ application.id }}/release">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit">Release (submit)</button>
+      <button type="submit">{{ "Release (send email)" if application.channel.startswith("email:") else "Release (submit)" }}</button>
     </form>
     <form method="post" action="/applications/{{ application.id }}/discard">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

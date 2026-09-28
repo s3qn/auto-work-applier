@@ -47,6 +47,62 @@ def test_jobs_page_lists_jobs_and_filters_by_status(client, with_password, confi
     assert "Pentester" not in filtered_only.text
 
 
+def test_jobs_queued_tab_shows_direct_channel_and_research_button(client, with_password, config):
+    login(client, with_password)
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        site_company = db.get_or_create_company(conn, "SiteCo")
+        job_id = db.create_job(
+            conn, source="linkedin", url="https://example.com/site", title="Pentester",
+            company_id=site_company, status="queued",
+        )
+        db.set_job_company_site_url(conn, job_id, "https://siteco.example/careers/123456")
+        email_company = db.get_or_create_company(conn, "EmailCo")
+        db.update_company_research(
+            conn, email_company, website=None, tldr="Does things.", careers_url=None,
+            cv_email="jobs@emailco.example", cv_email_source_url="https://emailco.example/contact",
+        )
+        db.create_job(
+            conn, source="linkedin", url="https://example.com/email", title="Red Teamer",
+            company_id=email_company, status="queued",
+        )
+    finally:
+        conn.close()
+
+    response = client.get("/jobs?status=queued")
+    assert response.status_code == 200
+    assert "site" in response.text
+    assert "email" in response.text
+    assert "Research companies for direct apply channels" in response.text
+
+
+def test_jobs_research_pending_runs_in_background(client, with_password, config, monkeypatch):
+    login(client, with_password)
+    from autojob.pipeline import run as run_module
+    from autojob.web import routes as routes_module
+
+    calls = []
+
+    def fake_research_pending(conn, *, work_dir, limit):
+        calls.append(limit)
+        return 0
+
+    monkeypatch.setattr(routes_module, "research_pending", fake_research_pending)
+
+    token = get_csrf_token(client, "/jobs")
+    response = client.post("/jobs/research-pending", data={"csrf_token": token}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/jobs?status=queued&research=started"
+
+    for _ in range(40):
+        if calls:
+            break
+        time.sleep(0.05)
+    assert calls == [run_module.MAX_RESEARCH_PER_RUN]
+
+
 def test_company_tldr_partial_renders(client, with_password, config):
     login(client, with_password)
     from autojob import db
@@ -411,3 +467,67 @@ def test_proof_file_is_served_only_to_logged_in_user(client, with_password, conf
     assert response.status_code == 200
     assert response.content == b"fake png bytes"
     assert response.headers["content-type"] == "image/png"
+
+
+# --- email channel: detail page card and targets settings -----------------
+
+def test_application_detail_page_renders_email_card(client, with_password, config):
+    login(client, with_password)
+    import json
+
+    from autojob import db
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="manual", url="https://example.com/job4", title="Pentester",
+            company_id=company_id, status="applying",
+        )
+        draft = {
+            "to": "jobs@acme.example.com",
+            "subject": "Application for Pentester (Sean)",
+            "body": "Dear hiring team,\n\nEmail: sean@example.com",
+            "attachment_name": "cv.pdf",
+        }
+        application_id = db.create_application(
+            conn, job_id=job_id, channel="email:acme.example.com", status="ready_to_submit",
+            email_to=draft["to"], email_draft=json.dumps(draft),
+        )
+    finally:
+        conn.close()
+
+    response = client.get(f"/applications/{application_id}")
+    assert response.status_code == 200
+    assert "jobs@acme.example.com" in response.text
+    assert "Application for Pentester (Sean)" in response.text
+    assert "cv.pdf" in response.text
+    assert "Release (send email)" in response.text
+
+
+def test_targets_save_email_daily_cap(client, with_password, config):
+    login(client, with_password)
+    token = get_csrf_token(client, "/targets")
+    response = client.post(
+        "/targets",
+        data={
+            "titles": "Pentester", "locations": "Israel", "max_years": "3",
+            "excluded_companies": "", "priority_companies": "", "daily_cap_per_source": "10",
+            "scan_times": "", "email_daily_cap": "3", "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+
+    from autojob import db
+    from autojob.web.deps import get_email_daily_cap
+
+    conn = db.get_connection(config)
+    try:
+        assert get_email_daily_cap(conn) == 3
+    finally:
+        conn.close()
+
+    reload_response = client.get("/targets")
+    assert 'id="email_daily_cap" name="email_daily_cap" min="0" value="3"' in reload_response.text
+    assert "SMTP: not configured" in reload_response.text

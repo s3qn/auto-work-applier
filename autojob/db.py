@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS applications (
         CHECK (
             channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')
             OR channel LIKE 'generic:%'
+            OR channel LIKE 'email:%'
         ),
     applied_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'sent'
@@ -56,7 +57,9 @@ CREATE TABLE IF NOT EXISTS applications (
     cover_letter TEXT,
     answers_json TEXT,
     cv_path TEXT,
-    apply_url TEXT
+    apply_url TEXT,
+    email_to TEXT,
+    email_draft TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proofs (
@@ -158,78 +161,136 @@ def _table_sql(conn: sqlite3.Connection, table: str) -> str:
     return row["sql"] if row else ""
 
 
-def _rebuild_applications_table(conn: sqlite3.Connection) -> None:
-    """Recreate `applications` with the current CHECK constraints (new
-    channel and status values, and the `generic:<domain>` channel the
-    generic apply handler uses), preserving every row. SQLite can't ALTER a
-    CHECK constraint in place, so this is the standard SQLite migration
-    dance: rename, recreate from SCHEMA, copy, drop. Guarded by a check of
-    the live constraint text so it only ever runs once."""
-    sql = _table_sql(conn, "applications")
-    if "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql:
+_APPLICATIONS_COLUMNS = (
+    "id", "job_id", "channel", "applied_at", "status", "notes",
+    "cover_letter", "answers_json", "cv_path", "apply_url", "email_to", "email_draft",
+)
+_PROOFS_COLUMNS = ("id", "application_id", "kind", "path", "created_at")
+
+
+def _schema_create_sql(table: str) -> str:
+    """The `CREATE TABLE IF NOT EXISTS <table> (...)` statement for `table`
+    out of SCHEMA, so a rebuild always matches the current definition."""
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {table} \(.*?\n\);", SCHEMA, flags=re.DOTALL
+    )
+    if match is None:
+        raise ValueError(f"no CREATE TABLE for {table} in SCHEMA")
+    return match.group(0)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return bool(_table_sql(conn, table))
+
+
+def _copy_rows(conn: sqlite3.Connection, source: str, target: str, columns: tuple[str, ...]) -> None:
+    source_columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({source})")}
+    shared = [c for c in columns if c in source_columns]
+    conn.execute(
+        f"INSERT INTO {target} ({', '.join(shared)}) SELECT {', '.join(shared)} FROM {source}"
+    )
+
+
+def _replace_table(conn: sqlite3.Connection, table: str, create_sql: str, columns: tuple[str, ...]) -> None:
+    """Swap `table` for a fresh one built from `create_sql`, keeping every
+    row. Builds `<table>_new`, copies, drops the old table, then renames the
+    new one into place. Never renames the live table away: SQLite rewrites
+    other tables' foreign keys to follow a rename, which is how `proofs`
+    once ended up pointing at "applications_old". Must run with foreign
+    keys off (see `migrate_schema`), since dropping a referenced table
+    would otherwise fail on every child row."""
+    new_name = f"{table}_new"
+    conn.execute(f"DROP TABLE IF EXISTS {new_name}")
+    conn.execute(create_sql.replace(f"CREATE TABLE IF NOT EXISTS {table} (", f"CREATE TABLE {new_name} (", 1))
+    _copy_rows(conn, table, new_name, columns)
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {new_name} RENAME TO {table}")
+
+
+def _recover_applications_old(conn: sqlite3.Connection) -> None:
+    """An earlier rename-based rebuild could die after renaming
+    `applications` to `applications_old`, leaving an empty `applications`
+    and every row stranded in the old table. Move them back, then drop the
+    leftover. If both tables hold rows, leave `applications_old` alone
+    rather than guess which copy is right."""
+    if not _table_exists(conn, "applications_old"):
         return
-    conn.execute("ALTER TABLE applications RENAME TO applications_old")
-    conn.execute(
-        """
-        CREATE TABLE applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id INTEGER NOT NULL REFERENCES jobs(id),
-            channel TEXT NOT NULL
-                CHECK (
-                    channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')
-                    OR channel LIKE 'generic:%'
-                ),
-            applied_at TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'sent'
-                CHECK (status IN (
-                    'ready_to_submit', 'sent', 'replied', 'interview', 'rejected',
-                    'not_interested', 'needs_help', 'failed', 'discarded'
-                )),
-            notes TEXT,
-            cover_letter TEXT,
-            answers_json TEXT,
-            cv_path TEXT,
-            apply_url TEXT
-        )
-        """
-    )
-    old_columns = {row["name"] for row in conn.execute("PRAGMA table_info(applications_old)")}
-    carried = [c for c in ("id", "job_id", "channel", "applied_at", "status", "notes") if c in old_columns]
-    extra = [c for c in ("cover_letter", "answers_json", "cv_path", "apply_url") if c in old_columns]
-    columns = carried + extra
-    conn.execute(
-        f"INSERT INTO applications ({', '.join(columns)}) "
-        f"SELECT {', '.join(columns)} FROM applications_old"
-    )
+    old_count = conn.execute("SELECT COUNT(*) FROM applications_old").fetchone()[0]
+    new_count = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
+    if old_count and new_count:
+        return
+    if old_count:
+        _copy_rows(conn, "applications_old", "applications", _APPLICATIONS_COLUMNS)
     conn.execute("DROP TABLE applications_old")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_applications_job_id ON applications(job_id)")
 
 
-def _rebuild_proofs_table(conn: sqlite3.Connection) -> None:
-    """Same rebuild dance as `_rebuild_applications_table`, for the `kind`
-    CHECK constraint on `proofs`."""
-    sql = _table_sql(conn, "proofs")
-    if "'confirmation'" in sql:
-        return
-    conn.execute("ALTER TABLE proofs RENAME TO proofs_old")
-    conn.execute(
-        """
-        CREATE TABLE proofs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            application_id INTEGER NOT NULL REFERENCES applications(id),
-            kind TEXT NOT NULL
-                CHECK (kind IN ('screenshot', 'confirmation', 'confirmation_email', 'sent_email', 'pdf')),
-            path TEXT NOT NULL,
-            created_at TEXT NOT NULL
+def _heal_applications_old_references(conn: sqlite3.Connection) -> None:
+    """Rebuild any table whose foreign key still names "applications_old"
+    so it points at `applications` again."""
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql LIKE '%applications_old%'"
+    ).fetchall()
+    for row in rows:
+        name = row["name"]
+        if name == "applications_old":
+            continue
+        if name == "proofs":
+            _replace_table(conn, "proofs", _schema_create_sql("proofs"), _PROOFS_COLUMNS)
+            continue
+        fixed = re.sub(r'"?applications_old"?', "applications", row["sql"])
+        fixed = re.sub(
+            rf'^CREATE TABLE "?{re.escape(name)}"?', f"CREATE TABLE IF NOT EXISTS {name}", fixed, count=1
         )
-        """
+        columns = tuple(r["name"] for r in conn.execute(f"PRAGMA table_info({name})"))
+        _replace_table(conn, name, fixed, columns)
+
+
+def _applications_is_current(conn: sqlite3.Connection) -> bool:
+    sql = _table_sql(conn, "applications")
+    return "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql and "email:" in sql
+
+
+def _rebuild_tables(conn: sqlite3.Connection) -> None:
+    """Bring the CHECK constraints on `applications` and `proofs` up to date
+    (SQLite can't ALTER a CHECK in place) and repair what the earlier
+    rename-based rebuild could leave behind. Each step is guarded by a
+    check of the live schema, so a current database is left untouched.
+
+    Runs in one transaction with foreign keys off: the pragma is a no-op
+    inside a transaction, so it is switched before BEGIN and restored after
+    COMMIT (or ROLLBACK)."""
+    needs_work = (
+        not _applications_is_current(conn)
+        or "'confirmation'" not in _table_sql(conn, "proofs")
+        or _table_exists(conn, "applications_old")
+        or conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND sql LIKE '%applications_old%'"
+        ).fetchone() is not None
     )
-    conn.execute(
-        "INSERT INTO proofs (id, application_id, kind, path, created_at) "
-        "SELECT id, application_id, kind, path, created_at FROM proofs_old"
-    )
-    conn.execute("DROP TABLE proofs_old")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_proofs_application_id ON proofs(application_id)")
+    if not needs_work:
+        return
+
+    conn.commit()
+    foreign_keys_were_on = conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        try:
+            if not _applications_is_current(conn):
+                _replace_table(conn, "applications", _schema_create_sql("applications"), _APPLICATIONS_COLUMNS)
+            _recover_applications_old(conn)
+            if "'confirmation'" not in _table_sql(conn, "proofs"):
+                _replace_table(conn, "proofs", _schema_create_sql("proofs"), _PROOFS_COLUMNS)
+            _heal_applications_old_references(conn)
+            for statement in re.findall(r"CREATE INDEX IF NOT EXISTS [^;]+;", SCHEMA):
+                conn.execute(statement)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        if foreign_keys_were_on:
+            conn.execute("PRAGMA foreign_keys = ON")
 
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
@@ -244,10 +305,18 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE companies ADD COLUMN careers_url TEXT")
     if not _column_exists(conn, "runs", "progress"):
         conn.execute("ALTER TABLE runs ADD COLUMN progress TEXT")
+    if not _column_exists(conn, "companies", "general_cv_url"):
+        conn.execute("ALTER TABLE companies ADD COLUMN general_cv_url TEXT")
+    if not _column_exists(conn, "companies", "cv_email"):
+        conn.execute("ALTER TABLE companies ADD COLUMN cv_email TEXT")
+    if not _column_exists(conn, "companies", "cv_email_source_url"):
+        conn.execute("ALTER TABLE companies ADD COLUMN cv_email_source_url TEXT")
+    if not _column_exists(conn, "companies", "channels_researched_at"):
+        conn.execute("ALTER TABLE companies ADD COLUMN channels_researched_at TEXT")
+    if not _column_exists(conn, "jobs", "company_site_url"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN company_site_url TEXT")
     conn.commit()
-    _rebuild_applications_table(conn)
-    _rebuild_proofs_table(conn)
-    conn.commit()
+    _rebuild_tables(conn)
 
 
 # --- settings -----------------------------------------------------------
@@ -297,10 +366,21 @@ def update_company_research(
     website: str | None,
     tldr: str,
     careers_url: str | None,
+    general_cv_url: str | None = None,
+    cv_email: str | None = None,
+    cv_email_source_url: str | None = None,
 ) -> None:
+    """Store the result of one research call. Stamps `channels_researched_at`
+    on every call, even when the three direct-apply fields all came back
+    null, so re-research is bounded to companies never looked at this way."""
     conn.execute(
-        "UPDATE companies SET website = ?, tldr = ?, careers_url = ?, researched_at = ? WHERE id = ?",
-        (website, tldr, careers_url, now_iso(), company_id),
+        "UPDATE companies SET website = ?, tldr = ?, careers_url = ?, general_cv_url = ?, "
+        "cv_email = ?, cv_email_source_url = ?, researched_at = ?, channels_researched_at = ? "
+        "WHERE id = ?",
+        (
+            website, tldr, careers_url, general_cv_url, cv_email, cv_email_source_url,
+            now_iso(), now_iso(), company_id,
+        ),
     )
     conn.commit()
 
@@ -348,7 +428,11 @@ def get_job_with_company(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row |
     return conn.execute(
         """
         SELECT jobs.*, companies.name AS company_name, companies.website AS company_website,
-               companies.tldr AS company_tldr, companies.careers_url AS company_careers_url
+               companies.tldr AS company_tldr, companies.careers_url AS company_careers_url,
+               companies.general_cv_url AS company_general_cv_url,
+               companies.cv_email AS company_cv_email,
+               companies.cv_email_source_url AS company_cv_email_source_url,
+               companies.channels_researched_at AS company_channels_researched_at
         FROM jobs
         LEFT JOIN companies ON companies.id = jobs.company_id
         WHERE jobs.id = ?
@@ -385,7 +469,11 @@ def list_jobs(conn: sqlite3.Connection, *, source: str | None = None, status: st
 def list_jobs_with_company(conn: sqlite3.Connection, *, status: str | None = None) -> list[sqlite3.Row]:
     query = (
         "SELECT jobs.*, companies.name AS company_name, companies.tldr AS company_tldr, "
-        "companies.website AS company_website, companies.careers_url AS company_careers_url "
+        "companies.website AS company_website, companies.careers_url AS company_careers_url, "
+        "companies.general_cv_url AS company_general_cv_url, "
+        "companies.cv_email AS company_cv_email, "
+        "companies.cv_email_source_url AS company_cv_email_source_url, "
+        "companies.channels_researched_at AS company_channels_researched_at "
         "FROM jobs LEFT JOIN companies ON companies.id = jobs.company_id WHERE 1=1"
     )
     params: list = []
@@ -399,6 +487,36 @@ def list_jobs_with_company(conn: sqlite3.Connection, *, status: str | None = Non
 def update_job_status(conn: sqlite3.Connection, job_id: int, status: str) -> None:
     conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
     conn.commit()
+
+
+def set_job_company_site_url(conn: sqlite3.Connection, job_id: int, url: str | None) -> None:
+    conn.execute("UPDATE jobs SET company_site_url = ? WHERE id = ?", (url, job_id))
+    conn.commit()
+
+
+def list_queued_jobs_needing_research(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    """One queued job per company whose `channels_researched_at` is still
+    null, newest job per company first, capped at `limit`. Covers companies
+    researched before the direct-apply fields existed (an old `tldr` but no
+    stamp) as well as brand new ones."""
+    return conn.execute(
+        """
+        SELECT jobs.id, jobs.url, jobs.title, jobs.company_id, companies.name AS company_name
+        FROM jobs
+        JOIN companies ON companies.id = jobs.company_id
+        WHERE jobs.status = 'queued'
+          AND companies.channels_researched_at IS NULL
+          AND jobs.id = (
+              SELECT j2.id FROM jobs j2
+              WHERE j2.company_id = jobs.company_id AND j2.status = 'queued'
+              ORDER BY j2.found_at DESC, j2.id DESC
+              LIMIT 1
+          )
+        ORDER BY jobs.found_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
 
 
 def set_job_filter_result(
@@ -424,12 +542,18 @@ def create_application(
     answers_json: str | None = None,
     cv_path: str | None = None,
     apply_url: str | None = None,
+    email_to: str | None = None,
+    email_draft: str | None = None,
 ) -> int:
     cur = conn.execute(
         "INSERT INTO applications "
-        "(job_id, channel, applied_at, status, notes, cover_letter, answers_json, cv_path, apply_url) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (job_id, channel, now_iso(), status, notes, cover_letter, answers_json, cv_path, apply_url),
+        "(job_id, channel, applied_at, status, notes, cover_letter, answers_json, cv_path, apply_url, "
+        "email_to, email_draft) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            job_id, channel, now_iso(), status, notes, cover_letter, answers_json, cv_path, apply_url,
+            email_to, email_draft,
+        ),
     )
     conn.commit()
     return cur.lastrowid
@@ -476,6 +600,10 @@ def update_application(
     cover_letter: str | None = None,
     answers_json: str | None = None,
     cv_path: str | None = None,
+    channel: str | None = None,
+    apply_url: str | None = None,
+    email_to: str | None = None,
+    email_draft: str | None = None,
 ) -> None:
     if status is not None:
         conn.execute("UPDATE applications SET status = ? WHERE id = ?", (status, application_id))
@@ -491,6 +619,60 @@ def update_application(
         )
     if cv_path is not None:
         conn.execute("UPDATE applications SET cv_path = ? WHERE id = ?", (cv_path, application_id))
+    if channel is not None:
+        conn.execute("UPDATE applications SET channel = ? WHERE id = ?", (channel, application_id))
+    if apply_url is not None:
+        conn.execute("UPDATE applications SET apply_url = ? WHERE id = ?", (apply_url, application_id))
+    if email_to is not None:
+        conn.execute("UPDATE applications SET email_to = ? WHERE id = ?", (email_to, application_id))
+    if email_draft is not None:
+        conn.execute(
+            "UPDATE applications SET email_draft = ? WHERE id = ?", (email_draft, application_id)
+        )
+    conn.commit()
+
+
+def email_already_sent(conn: sqlite3.Connection, job_id: int, email: str) -> bool:
+    """True if an email application for this job has already gone out to
+    this address, so the channel chain does not send a second one."""
+    row = conn.execute(
+        "SELECT 1 FROM applications WHERE job_id = ? AND email_to = ? AND status = 'sent' LIMIT 1",
+        (job_id, email),
+    ).fetchone()
+    return row is not None
+
+
+def email_draft_held_for_job(conn: sqlite3.Connection, job_id: int) -> bool:
+    """True if this job already has an email application drafted and
+    waiting for Release, so a second Apply does not hold a second draft
+    that could go out alongside it."""
+    row = conn.execute(
+        "SELECT 1 FROM applications WHERE job_id = ? AND channel LIKE 'email:%' "
+        "AND status = 'ready_to_submit' LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    return row is not None
+
+
+def count_emails_sent_since(conn: sqlite3.Connection, since_iso: str) -> int:
+    """Count applications with a `sent_email` proof created at or after
+    `since_iso` (an ISO timestamp, normally local midnight), used to enforce
+    the daily email cap regardless of which job or company they went to."""
+    row = conn.execute(
+        "SELECT COUNT(DISTINCT application_id) FROM proofs WHERE kind = 'sent_email' AND created_at >= ?",
+        (since_iso,),
+    ).fetchone()
+    return row[0]
+
+
+def resolve_open_help_items_for_job(conn: sqlite3.Connection, job_id: int, resolution: str) -> None:
+    """Resolve every still-open help item for a job in one call, used when a
+    later release (e.g. sending a held email) succeeds after an earlier
+    needs_help escalation for the same job."""
+    conn.execute(
+        "UPDATE help_items SET resolved_at = ?, resolution = ? WHERE job_id = ? AND resolved_at IS NULL",
+        (now_iso(), resolution, job_id),
+    )
     conn.commit()
 
 
@@ -538,6 +720,21 @@ def create_help_item(conn: sqlite3.Connection, *, job_id: int, reason: str) -> i
     )
     conn.commit()
     return cur.lastrowid
+
+
+def find_open_help_item(conn: sqlite3.Connection, job_id: int, *, reason_prefix: str) -> sqlite3.Row | None:
+    """The newest unresolved help item for `job_id` whose reason starts with
+    `reason_prefix`, or None."""
+    return conn.execute(
+        "SELECT * FROM help_items WHERE job_id = ? AND resolved_at IS NULL AND reason LIKE ? "
+        "ORDER BY id DESC LIMIT 1",
+        (job_id, reason_prefix.replace("%", "") + "%"),
+    ).fetchone()
+
+
+def update_help_item_reason(conn: sqlite3.Connection, help_item_id: int, reason: str) -> None:
+    conn.execute("UPDATE help_items SET reason = ? WHERE id = ?", (reason, help_item_id))
+    conn.commit()
 
 
 def list_open_help_items(conn: sqlite3.Connection) -> list[sqlite3.Row]:

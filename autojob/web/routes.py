@@ -14,14 +14,17 @@ from starlette.responses import FileResponse, PlainTextResponse, RedirectRespons
 from starlette.templating import Jinja2Templates
 
 from autojob import auth, db
+from autojob.apply import mailer
 from autojob.config import Config
 from autojob.pipeline import events
 from autojob.pipeline import run as run_module
+from autojob.pipeline.research import research_pending
 from autojob.web.deps import (
     base_context,
     get_auto_submit,
     get_config,
     get_db,
+    get_email_daily_cap,
     get_limiter,
     get_profile_answers,
     get_targets,
@@ -34,7 +37,13 @@ router = APIRouter()
 STATUS_CHOICES = ("sent", "replied", "interview", "rejected", "not_interested")
 CV_ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 CV_MAX_BYTES = 10 * 1024 * 1024
-PROOF_MEDIA_TYPES = {".png": "image/png", ".html": "text/html", ".pdf": "application/pdf", ".txt": "text/plain"}
+PROOF_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".html": "text/html",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".eml": "message/rfc822",
+}
 
 
 def sanitize_filename(name: str) -> str:
@@ -128,6 +137,13 @@ def application_detail(
     ctx = base_context(request, conn)
     ctx["application"] = application
     ctx["proofs"] = db.list_proofs(conn, application_id)
+    email_draft = None
+    if application["email_draft"]:
+        try:
+            email_draft = json.loads(application["email_draft"])
+        except (TypeError, ValueError):
+            email_draft = None
+    ctx["email_draft"] = email_draft
     return templates.TemplateResponse(request, "application_detail.html", ctx)
 
 
@@ -244,6 +260,8 @@ JOB_STATUS_TABS = ("all", "queued", "filtered_out")
 def jobs_list(
     request: Request,
     status: str = "all",
+    research: str | None = None,
+    busy: str | None = None,
     conn=Depends(get_db),
     templates: Jinja2Templates = Depends(get_templates),
 ):
@@ -251,7 +269,33 @@ def jobs_list(
     status_filter = status if status in ("queued", "filtered_out") else None
     ctx["jobs"] = db.list_jobs_with_company(conn, status=status_filter)
     ctx["status"] = status if status in JOB_STATUS_TABS else "all"
+    ctx["research_started"] = research == "started"
+    ctx["research_busy"] = busy == "1"
     return templates.TemplateResponse(request, "jobs.html", ctx)
+
+
+def _research_pending_and_release(lock: threading.Lock) -> None:
+    from autojob.config import load_config
+
+    config = load_config()
+    conn = db.get_connection(config)
+    try:
+        work_dir = config.data_dir / "llm-work"
+        research_pending(conn, work_dir=work_dir, limit=run_module.MAX_RESEARCH_PER_RUN)
+    finally:
+        conn.close()
+        lock.release()
+
+
+@router.post("/jobs/research-pending")
+def jobs_research_pending(request: Request, csrf_token: str = Form(...), conn=Depends(get_db)):
+    verify_csrf_or_403(request, csrf_token)
+    lock: threading.Lock = request.app.state.run_lock
+    if db.run_in_progress(conn) or not lock.acquire(blocking=False):
+        return RedirectResponse("/jobs?status=queued&busy=1", status_code=303)
+    thread = threading.Thread(target=_research_pending_and_release, args=(lock,), daemon=True)
+    thread.start()
+    return RedirectResponse("/jobs?status=queued&research=started", status_code=303)
 
 
 @router.get("/companies/{company_id}/tldr")
@@ -398,15 +442,26 @@ def submit_post(
 
 # --- targets -------------------------------------------------------------
 
+def _smtp_status_line(config: Config) -> str:
+    smtp_config = mailer.load_smtp_config(config)
+    if smtp_config is None:
+        return "SMTP: not configured (run uv run python -m autojob.set_smtp)"
+    from_address = smtp_config.get("from_address") or smtp_config.get("username", "")
+    return f"SMTP: configured as {from_address}"
+
+
 @router.get("/targets")
 def targets_get(
     request: Request,
     conn=Depends(get_db),
+    config: Config = Depends(get_config),
     templates: Jinja2Templates = Depends(get_templates),
 ):
     ctx = base_context(request, conn)
     ctx["targets"] = get_targets(conn)
     ctx["auto_submit"] = get_auto_submit(conn)
+    ctx["email_daily_cap"] = get_email_daily_cap(conn)
+    ctx["smtp_status"] = _smtp_status_line(config)
     ctx["saved"] = False
     return templates.TemplateResponse(request, "targets.html", ctx)
 
@@ -422,8 +477,10 @@ def targets_post(
     daily_cap_per_source: int = Form(20),
     scan_times: str = Form(""),
     auto_submit: bool = Form(False),
+    email_daily_cap: int = Form(15),
     csrf_token: str = Form(...),
     conn=Depends(get_db),
+    config: Config = Depends(get_config),
     templates: Jinja2Templates = Depends(get_templates),
 ):
     verify_csrf_or_403(request, csrf_token)
@@ -442,9 +499,12 @@ def targets_post(
     }
     db.set_setting(conn, "targets", new_targets)
     db.set_setting(conn, "auto_submit", auto_submit)
+    db.set_setting(conn, "email_daily_cap", email_daily_cap)
     ctx = base_context(request, conn)
     ctx["targets"] = get_targets(conn)
     ctx["auto_submit"] = get_auto_submit(conn)
+    ctx["email_daily_cap"] = get_email_daily_cap(conn)
+    ctx["smtp_status"] = _smtp_status_line(config)
     ctx["saved"] = True
     return templates.TemplateResponse(request, "targets.html", ctx)
 

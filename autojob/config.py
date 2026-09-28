@@ -34,6 +34,10 @@ class Config:
     def cv_dir(self) -> Path:
         return self.data_dir / "cv"
 
+    @property
+    def smtp_path(self) -> Path:
+        return self.data_dir / "smtp.json"
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cv_dir.mkdir(parents=True, exist_ok=True)

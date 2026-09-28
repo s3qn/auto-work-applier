@@ -229,12 +229,58 @@ def test_filter_jobs_without_conn_or_run_id_emits_nothing(monkeypatch, tmp_path)
 # --- research_company -------------------------------------------------
 
 def test_research_company_returns_parsed_fields(monkeypatch, tmp_path):
-    payload = {"website": "https://example.com", "tldr": "Does security things.", "careers_url": None}
+    payload = {
+        "website": "https://example.com",
+        "tldr": "Does security things.",
+        "careers_url": "https://example.com/careers",
+        "job_url_on_company_site": "https://example.com/jobs/42",
+        "general_cv_url": "https://example.com/send-cv",
+        "cv_email": "Jobs@Example.com",
+        "cv_email_source_url": "https://example.com/contact",
+    }
     monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps(payload)))
     info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
     assert info["website"] == "https://example.com"
     assert info["tldr"] == "Does security things."
-    assert info["careers_url"] is None
+    assert info["careers_url"] == "https://example.com/careers"
+    assert info["job_url_on_company_site"] == "https://example.com/jobs/42"
+    assert info["general_cv_url"] == "https://example.com/send-cv"
+    assert info["cv_email"] == "jobs@example.com"
+    assert info["cv_email_source_url"] == "https://example.com/contact"
+
+
+def test_research_company_drops_email_without_source_url(monkeypatch, tmp_path):
+    payload = {
+        "website": None, "tldr": "unused", "careers_url": None,
+        "job_url_on_company_site": None, "general_cv_url": None,
+        "cv_email": "jobs@example.com", "cv_email_source_url": None,
+    }
+    monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps(payload)))
+    info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
+    assert info["cv_email"] is None
+    assert info["cv_email_source_url"] is None
+
+
+def test_research_company_drops_malformed_email(monkeypatch, tmp_path):
+    payload = {
+        "website": None, "tldr": "unused", "careers_url": None,
+        "job_url_on_company_site": None, "general_cv_url": None,
+        "cv_email": "not-an-email", "cv_email_source_url": "https://example.com/contact",
+    }
+    monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps(payload)))
+    info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
+    assert info["cv_email"] is None
+
+
+def test_research_company_drops_job_board_url(monkeypatch, tmp_path):
+    payload = {
+        "website": None, "tldr": "unused", "careers_url": None,
+        "job_url_on_company_site": "https://www.linkedin.com/jobs/view/12345",
+        "general_cv_url": None, "cv_email": None, "cv_email_source_url": None,
+    }
+    monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps(payload)))
+    info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
+    assert info["job_url_on_company_site"] is None
 
 
 def test_research_company_returns_unknown_on_failure(monkeypatch, tmp_path):
@@ -245,3 +291,70 @@ def test_research_company_returns_unknown_on_failure(monkeypatch, tmp_path):
     info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
     assert info["website"] is None
     assert "unknown" in info["tldr"]
+    assert info["careers_url"] is None
+    assert info["job_url_on_company_site"] is None
+    assert info["general_cv_url"] is None
+    assert info["cv_email"] is None
+    assert info["cv_email_source_url"] is None
+
+
+def test_research_company_prompt_has_honest_profile_not_years_of_experience():
+    prompt = llm_research._build_prompt("ExampleCo", "Pentester", "https://example.com/job/1")
+    assert "close to no professional" in prompt
+    assert "2 years" not in prompt
+
+
+def test_research_company_flags_failure(monkeypatch, tmp_path):
+    def fake_run(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="claude", timeout=300)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
+    assert info["failed"] is True
+
+
+def test_research_company_success_is_not_flagged_failed(monkeypatch, tmp_path):
+    payload = {"website": "https://example.com", "tldr": "Does things."}
+    monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps(payload)))
+    info = llm_research.research_company("ExampleCo", "Pentester", work_dir=tmp_path)
+    assert info["failed"] is False
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://il.indeed.co.il/viewjob?jk=1",
+        "https://www.glassdoor.co.uk/job-listing/x",
+        "https://www.glassdoor.co.il/Job/x",
+        "https://lnkd.in/abc123",
+    ],
+)
+def test_clean_email_rejects_job_board_source_pages(source_url):
+    assert llm_research._clean_email("jobs@acme.com", source_url, "https://acme.com") == (None, None)
+
+
+def test_clean_email_rejects_address_on_an_unrelated_domain():
+    email, source = llm_research._clean_email(
+        "hr@gmail.com", "https://acme.com/careers", "https://acme.com"
+    )
+    assert (email, source) == (None, None)
+
+
+def test_clean_email_accepts_company_domain_and_subdomains():
+    assert llm_research._clean_email(
+        "jobs@acme.co.il", "https://careers.acme.co.il/contact", "https://www.acme.co.il"
+    )[0] == "jobs@acme.co.il"
+    assert llm_research._clean_email(
+        "cv@hr.acme.co.il", "https://blog.example.org/post", "https://acme.co.il"
+    )[0] == "cv@hr.acme.co.il"
+
+
+def test_clean_email_accepts_source_page_host_when_website_unknown():
+    assert llm_research._clean_email("jobs@acme.io", "https://www.acme.io/jobs", None)[0] == "jobs@acme.io"
+    assert llm_research._clean_email("jobs@other.io", "https://www.acme.io/jobs", None) == (None, None)
+
+
+def test_clean_email_rejects_address_on_a_job_board_domain():
+    assert llm_research._clean_email(
+        "jobs@alljobs.co.il", "https://www.alljobs.co.il/x", None
+    ) == (None, None)

@@ -23,8 +23,12 @@ def application_dir(config: Config, application_id: int) -> Path:
     return path
 
 
-def capture_form_screenshot(conn, config: Config, application_id: int, page) -> Path:
-    path = application_dir(config, application_id) / "form.png"
+def capture_form_screenshot(conn, config: Config, application_id: int, page, filename: str = "form.png") -> Path:
+    """Screenshot of the filled form. The terminal channel attempt in a
+    channel chain keeps the default `form.png`; an attempt that falls
+    through to the next channel saves as `attempt-<n>-<kind>.png` instead,
+    so every step of the chain leaves a trace under the same application."""
+    path = application_dir(config, application_id) / filename
     page.screenshot(path=str(path), full_page=True)
     db.create_proof(conn, application_id=application_id, kind="screenshot", path=str(path))
     return path

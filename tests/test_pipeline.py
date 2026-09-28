@@ -3,6 +3,8 @@ browser: every source, every LLM call, and the apply phase are all fakes."""
 
 from __future__ import annotations
 
+import pytest
+
 from autojob import db
 from autojob.llm import filter as llm_filter
 from autojob.llm import research as llm_research
@@ -33,8 +35,20 @@ def _patch_no_op_research(monkeypatch):
     monkeypatch.setattr(
         llm_research,
         "research_company",
-        lambda name, title, *, work_dir: {"website": None, "tldr": "unused", "careers_url": None},
+        lambda name, title, *, work_dir, **kw: {
+            "website": None, "tldr": "unused", "careers_url": None,
+            "job_url_on_company_site": None, "general_cv_url": None,
+            "cv_email": None, "cv_email_source_url": None,
+        },
     )
+
+
+@pytest.fixture(autouse=True)
+def _never_call_real_research(monkeypatch):
+    """Research runs on every scan now, even with nothing new found, so any
+    test that leaves a job queued would otherwise reach the real claude CLI.
+    Tests that care about research override this with their own fake."""
+    _patch_no_op_research(monkeypatch)
 
 
 def _patch_no_op_apply(monkeypatch, calls=None):
@@ -81,9 +95,13 @@ def test_run_scan_creates_queued_and_filtered_jobs_and_researches_company(config
 
     researched = []
 
-    def fake_research(name, title, *, work_dir):
+    def fake_research(name, title, *, work_dir, **kw):
         researched.append(name)
-        return {"website": "https://acme.example", "tldr": "Acme does security consulting.", "careers_url": None}
+        return {
+            "website": "https://acme.example", "tldr": "Acme does security consulting.",
+            "careers_url": None, "job_url_on_company_site": None, "general_cv_url": None,
+            "cv_email": None, "cv_email_source_url": None,
+        }
 
     monkeypatch.setattr(llm_research, "research_company", fake_research)
     _patch_no_op_apply(monkeypatch)
@@ -108,6 +126,62 @@ def test_run_scan_creates_queued_and_filtered_jobs_and_researches_company(config
     assert by_title["Penetration Tester"]["company_tldr"] == "Acme does security consulting."
     assert by_title["VP of Sales"]["status"] == "filtered_out"
     assert researched == ["Acme"]
+
+
+def test_run_scan_stamps_channels_and_reresearches_unstamped_company(config, monkeypatch):
+    # A brand new job (Acme) gets researched like any other. A second
+    # company (Beta) was already queued from an earlier run and already has
+    # a tldr, but never got a channels_researched_at stamp (pre-feature
+    # data): it must be researched again too, in the same run.
+    kept = _job(n=1, title="Penetration Tester", company="Acme")
+    _patch_sources(monkeypatch, linkedin_jobs=[kept])
+    monkeypatch.setattr(
+        llm_filter, "filter_jobs",
+        lambda jobs, cv_text, *, work_dir, batch_size=10, **kwargs: [
+            {"status": "queued", "fit_score": 8.0, "reason": "good fit"} for _ in jobs
+        ],
+    )
+
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        beta_id = db.get_or_create_company(conn, "Beta")
+        conn.execute("UPDATE companies SET tldr = 'Old tldr, no stamp.' WHERE id = ?", (beta_id,))
+        conn.commit()
+        db.create_job(
+            conn, source="linkedin", url="https://example.com/beta/1", title="Pentester",
+            company_id=beta_id, status="queued", dedup_key=db.normalize_dedup_key("Beta", "Pentester"),
+        )
+    finally:
+        conn.close()
+
+    researched = []
+
+    def fake_research(name, title, *, work_dir, job_url=""):
+        researched.append(name)
+        return {
+            "website": None, "tldr": f"Researched {name}.", "careers_url": None,
+            "job_url_on_company_site": f"{job_url}/on-site" if job_url else None,
+            "general_cv_url": None, "cv_email": None, "cv_email_source_url": None,
+        }
+
+    monkeypatch.setattr(llm_research, "research_company", fake_research)
+    _patch_no_op_apply(monkeypatch)
+
+    run_module.run_scan(trigger="manual", keywords=["pentest"])
+
+    conn = db.get_connection(config)
+    try:
+        jobs = db.list_jobs_with_company(conn)
+        beta = db.get_company(conn, beta_id)
+    finally:
+        conn.close()
+
+    assert sorted(researched) == ["Acme", "Beta"]
+    assert beta["channels_researched_at"] is not None
+    by_title_and_company = {(j["title"], j["company_name"]): j for j in jobs}
+    acme_job = by_title_and_company[("Penetration Tester", "Acme")]
+    assert acme_job["company_site_url"] == f"{acme_job['url']}/on-site"
 
 
 def test_run_scan_does_not_resurface_already_seen_jobs(config, monkeypatch):
@@ -248,9 +322,13 @@ def test_run_scan_respects_research_cap(config, monkeypatch):
     )
     researched = []
 
-    def fake_research(name, title, *, work_dir):
+    def fake_research(name, title, *, work_dir, **kw):
         researched.append(name)
-        return {"website": None, "tldr": "some tldr", "careers_url": None}
+        return {
+            "website": None, "tldr": "some tldr", "careers_url": None,
+            "job_url_on_company_site": None, "general_cv_url": None,
+            "cv_email": None, "cv_email_source_url": None,
+        }
 
     monkeypatch.setattr(llm_research, "research_company", fake_research)
     _patch_no_op_apply(monkeypatch)
@@ -398,3 +476,89 @@ def test_run_scan_writes_run_events_for_the_live_view(config, monkeypatch):
     assert {"scan", "filter", "apply", "system"}.issubset(phases)
     assert rows[-1]["message"] == "Run finished."
     assert run_row["progress"] is not None
+
+
+def test_failed_research_keeps_existing_fields_and_is_retried(config, monkeypatch):
+    """A failed research call must not overwrite a good tldr or careers URL,
+    must not stamp channels_researched_at (so the next run retries), and
+    counts as a failure on the run."""
+    _patch_sources(monkeypatch)
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        conn.execute(
+            "UPDATE companies SET tldr = 'Good tldr.', careers_url = 'https://acme.example/careers' WHERE id = ?",
+            (company_id,),
+        )
+        conn.commit()
+        db.create_job(
+            conn, source="linkedin", url="https://example.com/acme/1", title="Pentester",
+            company_id=company_id, status="queued", dedup_key="acme-pentester",
+        )
+    finally:
+        conn.close()
+
+    researched = []
+
+    def failing_research(name, title, *, work_dir, **kw):
+        researched.append(name)
+        return {
+            "website": None, "tldr": "unknown (company research failed: timeout)", "careers_url": None,
+            "job_url_on_company_site": None, "general_cv_url": None,
+            "cv_email": None, "cv_email_source_url": None, "failed": True,
+        }
+
+    monkeypatch.setattr(llm_research, "research_company", failing_research)
+    _patch_no_op_apply(monkeypatch)
+
+    # Nothing new is found: research must still run for the existing company.
+    run_id = run_module.run_scan(trigger="manual", keywords=["pentest"])
+
+    conn = db.get_connection(config)
+    try:
+        company = db.get_company(conn, company_id)
+        run_row = db.get_run(conn, run_id)
+    finally:
+        conn.close()
+    assert researched == ["Acme"]
+    assert company["tldr"] == "Good tldr."
+    assert company["careers_url"] == "https://acme.example/careers"
+    assert company["channels_researched_at"] is None
+    assert run_row["failed"] == 1
+
+
+def test_research_runs_every_scan_even_with_nothing_new(config, monkeypatch):
+    _patch_sources(monkeypatch)
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Beta")
+        db.create_job(
+            conn, source="linkedin", url="https://example.com/beta/1", title="Pentester",
+            company_id=company_id, status="queued", dedup_key="beta-pentester",
+        )
+    finally:
+        conn.close()
+    researched = []
+
+    def fake_research(name, title, *, work_dir, **kw):
+        researched.append(name)
+        return {
+            "website": None, "tldr": "Beta tldr.", "careers_url": None,
+            "job_url_on_company_site": None, "general_cv_url": None,
+            "cv_email": None, "cv_email_source_url": None,
+        }
+
+    monkeypatch.setattr(llm_research, "research_company", fake_research)
+    _patch_no_op_apply(monkeypatch)
+
+    run_module.run_scan(trigger="manual", keywords=["pentest"])
+
+    conn = db.get_connection(config)
+    try:
+        company = db.get_company(conn, company_id)
+    finally:
+        conn.close()
+    assert researched == ["Beta"]
+    assert company["channels_researched_at"] is not None

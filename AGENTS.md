@@ -85,8 +85,8 @@ Playwright is concerned. If `xvfb-run` isn't installed it prints
 
 `autojob/apply/` turns a queued job into a filled (and maybe submitted)
 application:
-- `router.py` picks a handler by the application URL (`companies.careers_url`
-  from research when present, otherwise the job's own URL): Greenhouse
+- `router.py` picks a handler by whichever application URL the channel chain
+  below (`apply.py`) hands it for the attempt in progress: Greenhouse
   (`boards.greenhouse.io` / `job-boards.greenhouse.io`), Lever
   (`jobs.lever.co`), or Comeet (`comeet.com`, or embedded on a company's own
   domain, detected by the `comeet.co` iframe it injects). `pick_handler`
@@ -168,13 +168,49 @@ application:
   `proofs` row per file. Proof files are served only through the
   authenticated route `/applications/<id>/proofs/<proof_id>`, never a
   static mount.
-- `apply.py` (`apply_to_job(job, *, auto_submit)`) ties it together, and
+- `apply.py` (`apply_to_job(job, *, auto_submit)`) is company-site-first:
+  `plan_channels(job, conn)` builds an ordered list of channels to try for
+  one job, (a) `company_job` (`jobs.company_site_url`, the posting research
+  found on the company's own site or ATS), (b) `careers`
+  (`companies.careers_url`, only when it looks like a specific posting
+  rather than a bare `/careers` listing), (c) `general_cv`
+  (`companies.general_cv_url`, a general "send us your CV" form), (d)
+  `email` (`companies.cv_email`, dropped when already sent to this job or
+  the daily cap is reached), (e) `job_url` (the job's own board URL, the
+  only channel a fresh account with no research ever sees, today's
+  behaviour). One browser page is opened for the whole chain; a
+  `needs_help`/`failed` result on a non-final channel falls through to the
+  next one only when the reason looks like the channel itself was unusable
+  (CAPTCHA, no form found, a signup wall, a crash); a required question the
+  handler can't honestly answer, or a login requirement, escalates
+  immediately instead of trying a lesser channel. Every attempt records
+  `applications.channel`/`apply_url` as it starts, so the column always
+  reflects whichever channel ended the chain; a fallen-through attempt
+  appends a `Tried <kind> <target>: <reason>` line to `notes` and keeps its
+  own screenshot (`attempt-<n>-<kind>.png`) instead of the terminal
+  `form.png`. An application filled by the generic handler records its
+  `channel` as `generic:<domain>` (e.g. `generic:catonetworks.com`), not one
+  of the fixed ATS names; the `applications.channel` CHECK constraint allows
+  that plus `email:<domain>`.
   `release_application(application_id)` is what a "Release" click on the
   dashboard uses to go back and actually submit an already-filled
-  `ready_to_submit` application. An application filled by the generic
-  handler records its `channel` as `generic:<domain>` (e.g.
-  `generic:catonetworks.com`), not one of the fixed ATS names; the
-  `applications.channel` CHECK constraint allows both.
+  `ready_to_submit` application; for a held email it calls
+  `mailer.send_draft` directly (no browser, no new LLM call) instead of
+  refilling a page.
+- `mailer.py` is the email channel: no second LLM call, the body reuses the
+  cover letter already generated for the job plus a contact block from
+  `profile.answers`. `smtp.gmail.com:587` STARTTLS with a Google App
+  Password, credentials in `data/smtp.json` (0600, written by
+  `uv run python -m autojob.set_smtp`), never in the database or in code.
+  With `auto_submit` off the draft is stored and the application waits as
+  `ready_to_submit` for Sean to review and release; with it on, `send_draft`
+  sends immediately. A missing or failing SMTP config leaves the
+  application `ready_to_submit` with a help item instead of falling through
+  to the job's board URL: the email channel is always terminal, whatever
+  its outcome. `send_draft` saves the exact bytes sent (`sent.eml`) and a
+  readable header-plus-body copy (`sent_email.txt`) as `sent_email` proofs;
+  the daily cap counts distinct applications with a `sent_email` proof since
+  local midnight.
 
 **Safety default: `auto_submit` (settings key, default `false`).** When
 off, a handler fills the whole form, takes its screenshot, and stops before
@@ -192,6 +228,19 @@ Filtering (`autojob/llm/filter.py`, haiku) and company research
 call the local `claude` CLI through `autojob/llm/cli.py`, no API key:
 `claude -p --model <model> --output-format json`, prompt on stdin, JSON
 parsed out of the response's `"result"` field.
+
+`research_company` asks for `website`, `tldr`, `careers_url`,
+`job_url_on_company_site`, `general_cv_url`, `cv_email`, and
+`cv_email_source_url`, and validates every one before it reaches the
+database: a URL is kept only if it's `http(s)://` and its host isn't a job
+board (LinkedIn, AllJobs, JobMaster, Drushim, Indeed, Glassdoor); an email
+is kept only if it matches a basic address shape and its `source_url`
+passed that same URL check, since `cv_email` must be an address literally
+seen on a fetched page, never guessed from a pattern like `jobs@domain`.
+`autojob.pipeline.research.research_pending` runs this one company at a
+time for queued jobs whose company has no `channels_researched_at` stamp
+yet, so re-research is bounded and existing companies pick up the new
+fields hands-off.
 
 **Every call sets `cwd` to `data/llm-work/`** (created on demand), never
 this repo. Running from the repo root would load this repo's own

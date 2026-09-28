@@ -20,9 +20,9 @@ from autojob import db
 from autojob.apply.apply import apply_to_job
 from autojob.config import load_config
 from autojob.llm import filter as llm_filter
-from autojob.llm import research as llm_research
 from autojob.llm.cv import get_cv_text
 from autojob.pipeline import events
+from autojob.pipeline.research import research_pending
 from autojob.sources import SourceError, alljobs, jobmaster, linkedin
 from autojob.web.deps import get_auto_submit, get_targets
 
@@ -204,7 +204,6 @@ def run_scan(
 
                 filter_results = llm_filter.filter_jobs(new_jobs, cv_text, work_dir=work_dir, conn=conn, run_id=run_id)
 
-                queued: list[tuple[int, dict]] = []
                 status_counts: dict[str, int] = {}
                 for job, result in zip(new_jobs, filter_results):
                     try:
@@ -231,8 +230,6 @@ def run_scan(
                         failed += 1
                         continue
                     status_counts[result["status"]] = status_counts.get(result["status"], 0) + 1
-                    if job_id is not None and result["status"] == "queued":
-                        queued.append((company_id, job))
 
                 filtered = status_counts.get("filtered_out", 0)
                 logger.log(
@@ -247,48 +244,17 @@ def run_scan(
                     f"Filter results: {status_counts.get('queued', 0)} queued, {filtered} filtered out.",
                     done=len(new_jobs), total=len(new_jobs), filtered=filtered,
                 )
-
-                researched = 0
-                seen_companies: set[int] = set()
-                research_total = min(len({cid for cid, _ in queued}), max_research)
-                for company_id, job in queued:
-                    if researched >= max_research:
-                        logger.log(f"Reached the research cap ({max_research}) for this run.")
-                        events.emit(conn, run_id, "research", "info", f"Reached the research cap ({max_research}) for this run.")
-                        break
-                    if company_id in seen_companies:
-                        continue
-                    seen_companies.add(company_id)
-                    try:
-                        company = db.get_company(conn, company_id)
-                        if company is None or company["tldr"]:
-                            continue
-                        events.emit(conn, run_id, "research", "info", f"research: starting {company['name']}.")
-                        info = llm_research.research_company(
-                            company["name"], job.get("title", ""), work_dir=work_dir
-                        )
-                        db.update_company_research(
-                            conn,
-                            company_id,
-                            website=info["website"],
-                            tldr=info["tldr"],
-                            careers_url=info["careers_url"],
-                        )
-                    except Exception as exc:  # noqa: BLE001 - one bad company must never stop the rest
-                        logger.log(f"Company research failed for company id {company_id}: {exc}")
-                        events.emit(conn, run_id, "research", "error", f"Company research failed for company id {company_id}: {exc}")
-                        failed += 1
-                        continue
-                    researched += 1
-                    logger.log(f"Researched company: {company['name']}.")
-                    events.bump_progress(
-                        conn, run_id, "research", f"research: finished {company['name']}.",
-                        done=researched, total=research_total,
-                    )
-                logger.log(f"Researched {researched} compan{'y' if researched == 1 else 'ies'} this run.")
             else:
-                logger.log("Nothing new to filter or research.")
-                events.emit(conn, run_id, "system", "info", "Nothing new to filter or research.")
+                logger.log("Nothing new to filter.")
+                events.emit(conn, run_id, "system", "info", "Nothing new to filter.")
+
+            # Every scan, not only one that found something: companies
+            # already in the database still need their apply channels
+            # looked up, and a failed lookup gets retried here.
+            _, research_failed = research_pending(
+                conn, work_dir=config.data_dir / "llm-work", limit=max_research, run_id=run_id, logger=logger
+            )
+            failed += research_failed
 
             auto_submit = get_auto_submit(conn)
             daily_cap = targets.get("daily_cap_per_source") or DEFAULT_DAILY_CAP_PER_SOURCE

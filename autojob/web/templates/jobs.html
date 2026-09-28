@@ -7,12 +7,24 @@
   <a class="tab {{ 'active' if status == 'queued' else '' }}" href="/jobs?status=queued">Queued</a>
   <a class="tab {{ 'active' if status == 'filtered_out' else '' }}" href="/jobs?status=filtered_out">Filtered out</a>
 </div>
+{% if status == 'queued' %}
+<form method="post" action="/jobs/research-pending">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit">Research companies for direct apply channels</button>
+</form>
+{% if research_started %}
+<p>Research started in the background.</p>
+{% endif %}
+{% if research_busy %}
+<p>A run is already in progress. Try again once it finishes.</p>
+{% endif %}
+{% endif %}
 <div class="card table-card">
   {% if jobs %}
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Fit</th><th>Title</th><th>Company</th><th>Source</th><th>Location</th><th>Status</th><th>Reason</th><th></th></tr>
+      <tr><th>Fit</th><th>Title</th><th>Company</th><th>Source</th><th>Location</th><th>Status</th><th>Reason</th><th>Direct</th><th></th></tr>
     </thead>
     <tbody>
       {% for job in jobs %}
@@ -36,6 +48,13 @@
         <td><span class="chip chip-{{ job.status }}">{{ job.status.replace('_', ' ') }}</span></td>
         <td>{{ job.reason or "-" }}</td>
         <td>
+          {% if job.company_site_url %}site
+          {% elif job.company_general_cv_url %}form
+          {% elif job.company_cv_email %}email
+          {% else %}-
+          {% endif %}
+        </td>
+        <td>
           <form method="post" action="/jobs/{{ job.id }}/apply" class="apply-now-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="link-button">Apply now</button>
@@ -44,7 +63,7 @@
       </tr>
       {% if job.company_id %}
       <tr class="tldr-row" id="tldr-row-{{ job.id }}">
-        <td colspan="8"><div id="tldr-{{ job.id }}" class="company-tldr">Loading&hellip;</div></td>
+        <td colspan="9"><div id="tldr-{{ job.id }}" class="company-tldr">Loading&hellip;</div></td>
       </tr>
       {% endif %}
       {% endfor %}
