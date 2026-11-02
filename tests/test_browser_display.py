@@ -216,6 +216,11 @@ def test_zombie_child_is_dead_and_reaped():
 def test_pid_runs_checks_cmdline():
     child = subprocess.Popen(["sleep", "30"])
     try:
+        # Right after Popen the child may not have exec'd yet, so its
+        # cmdline still shows the Python parent. Wait for the exec.
+        deadline = time.monotonic() + 2
+        while not display._pid_runs(child.pid, "sleep") and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert display._pid_alive(child.pid) is True
         assert display._pid_runs(child.pid, "sleep") is True
         assert display._pid_runs(child.pid, "Xvfb") is False

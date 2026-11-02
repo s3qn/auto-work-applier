@@ -6,6 +6,8 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 DAILY_RUN_TIME = time(8, 0)
+# deploy/autojob-pilot.timer must match.
+PILOT_RUN_TIME = time(2, 0)
 TIMEZONE = ZoneInfo("Asia/Jerusalem")
 
 

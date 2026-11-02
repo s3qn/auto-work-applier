@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS applications (
             channel IN ('comeet', 'greenhouse', 'lever', 'email', 'google_form', 'linkedin', 'other')
             OR channel LIKE 'generic:%'
             OR channel LIKE 'email:%'
+            OR channel LIKE 'agent:%'
         ),
     applied_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'sent'
@@ -59,7 +60,9 @@ CREATE TABLE IF NOT EXISTS applications (
     cv_path TEXT,
     apply_url TEXT,
     email_to TEXT,
-    email_draft TEXT
+    email_draft TEXT,
+    run_id INTEGER,
+    pilot_verdict TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proofs (
@@ -164,6 +167,7 @@ def _table_sql(conn: sqlite3.Connection, table: str) -> str:
 _APPLICATIONS_COLUMNS = (
     "id", "job_id", "channel", "applied_at", "status", "notes",
     "cover_letter", "answers_json", "cv_path", "apply_url", "email_to", "email_draft",
+    "run_id", "pilot_verdict",
 )
 _PROOFS_COLUMNS = ("id", "application_id", "kind", "path", "created_at")
 
@@ -247,7 +251,7 @@ def _heal_applications_old_references(conn: sqlite3.Connection) -> None:
 
 def _applications_is_current(conn: sqlite3.Connection) -> bool:
     sql = _table_sql(conn, "applications")
-    return "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql and "email:" in sql
+    return "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql and "email:" in sql and "agent:" in sql
 
 
 def _rebuild_tables(conn: sqlite3.Connection) -> None:
@@ -317,6 +321,14 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE companies ADD COLUMN channels_researched_at TEXT")
     if not _column_exists(conn, "jobs", "company_site_url"):
         conn.execute("ALTER TABLE jobs ADD COLUMN company_site_url TEXT")
+    if not _column_exists(conn, "applications", "run_id"):
+        conn.execute("ALTER TABLE applications ADD COLUMN run_id INTEGER")
+    if not _column_exists(conn, "applications", "pilot_verdict"):
+        conn.execute("ALTER TABLE applications ADD COLUMN pilot_verdict TEXT")
+    for column in ("worker_phase TEXT", "worker_lease_until TEXT", "worker_lease_token TEXT",
+                   "worker_application_id INTEGER"):
+        if not _column_exists(conn, "jobs", column.split()[0]):
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {column}")
     conn.commit()
     _rebuild_tables(conn)
 
@@ -328,6 +340,16 @@ def get_setting(conn: sqlite3.Connection, key: str, default=None):
     if row is None:
         return default
     return json.loads(row["value"])
+
+
+def claim_setting_flag(conn: sqlite3.Connection, key: str) -> bool:
+    """Atomically flip a boolean setting from true to false. True only for the one caller that did it."""
+    cur = conn.execute(
+        "UPDATE settings SET value = ? WHERE key = ? AND value = ?",
+        (json.dumps(False), key, json.dumps(True)),
+    )
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def set_setting(conn: sqlite3.Connection, key: str, value) -> None:
@@ -546,19 +568,81 @@ def create_application(
     apply_url: str | None = None,
     email_to: str | None = None,
     email_draft: str | None = None,
+    run_id: int | None = None,
 ) -> int:
     cur = conn.execute(
         "INSERT INTO applications "
         "(job_id, channel, applied_at, status, notes, cover_letter, answers_json, cv_path, apply_url, "
-        "email_to, email_draft) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "email_to, email_draft, run_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             job_id, channel, now_iso(), status, notes, cover_letter, answers_json, cv_path, apply_url,
-            email_to, email_draft,
+            email_to, email_draft, run_id,
         ),
     )
     conn.commit()
     return cur.lastrowid
+
+
+PILOT_VERDICTS = ("right", "wrong")
+
+
+def latest_pilot_run_id(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute("SELECT id FROM runs WHERE mode = 'pilot' ORDER BY id DESC LIMIT 1").fetchone()
+    return row["id"] if row else None
+
+
+def list_pilot_runs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM runs WHERE mode = 'pilot' ORDER BY id DESC").fetchall()
+
+
+def list_pilot_applications(conn: sqlite3.Connection, run_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT a.*, j.title AS job_title, c.name AS company_name
+        FROM applications a
+        JOIN jobs j ON j.id = a.job_id
+        LEFT JOIN companies c ON c.id = j.company_id
+        WHERE a.run_id = ?
+        ORDER BY a.id
+        """,
+        (run_id,),
+    ).fetchall()
+
+
+def set_pilot_verdict(conn: sqlite3.Connection, application_id: int, verdict: str | None) -> None:
+    if verdict is not None and verdict not in PILOT_VERDICTS:
+        raise ValueError(f"Invalid pilot verdict: {verdict!r}")
+    conn.execute("UPDATE applications SET pilot_verdict = ? WHERE id = ?", (verdict, application_id))
+    conn.commit()
+
+
+def channel_group(channel: str) -> str:
+    """`generic:foo.com` groups as `generic`, `email:x.com` as `email`."""
+    return channel.split(":", 1)[0]
+
+
+def pilot_summary(conn: sqlite3.Connection, run_id: int) -> list[dict]:
+    """Per channel group: right, wrong, unreviewed, total and the success
+    percent among reviewed rows (None while nothing is reviewed)."""
+    groups: dict[str, dict] = {}
+    for row in conn.execute(
+        "SELECT channel, pilot_verdict FROM applications WHERE run_id = ?", (run_id,)
+    ).fetchall():
+        g = groups.setdefault(
+            channel_group(row["channel"]),
+            {"channel": channel_group(row["channel"]), "right": 0, "wrong": 0, "unreviewed": 0, "total": 0},
+        )
+        g["total"] += 1
+        if row["pilot_verdict"] in PILOT_VERDICTS:
+            g[row["pilot_verdict"]] += 1
+        else:
+            g["unreviewed"] += 1
+    result = sorted(groups.values(), key=lambda g: g["channel"])
+    for g in result:
+        reviewed = g["right"] + g["wrong"]
+        g["percent"] = round(100 * g["right"] / reviewed) if reviewed else None
+    return result
 
 
 def get_application(conn: sqlite3.Connection, application_id: int) -> sqlite3.Row | None:
@@ -570,7 +654,11 @@ def list_applications_with_jobs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """
         SELECT applications.*, jobs.title AS job_title, jobs.url AS job_url,
                companies.id AS company_id, companies.name AS company_name, companies.tldr AS company_tldr,
-               (SELECT COUNT(*) FROM proofs WHERE proofs.application_id = applications.id) AS proof_count
+               (SELECT COUNT(*) FROM proofs WHERE proofs.application_id = applications.id) AS proof_count,
+               EXISTS (SELECT 1 FROM runs WHERE runs.id = applications.run_id AND runs.mode = 'pilot') AS is_pilot,
+               (jobs.worker_phase = 'submit'
+                OR (jobs.worker_lease_token IS NOT NULL AND jobs.worker_lease_until >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ) AS submit_pending
         FROM applications
         JOIN jobs ON jobs.id = applications.job_id
         LEFT JOIN companies ON companies.id = jobs.company_id
@@ -583,7 +671,11 @@ def get_application_with_job(conn: sqlite3.Connection, application_id: int) -> s
     return conn.execute(
         """
         SELECT applications.*, jobs.title AS job_title, jobs.url AS job_url,
-               jobs.id AS job_id, companies.name AS company_name, companies.tldr AS company_tldr
+               jobs.id AS job_id, companies.name AS company_name, companies.tldr AS company_tldr,
+               EXISTS (SELECT 1 FROM runs WHERE runs.id = applications.run_id AND runs.mode = 'pilot') AS is_pilot,
+               (jobs.worker_phase = 'submit'
+                OR (jobs.worker_lease_token IS NOT NULL AND jobs.worker_lease_until >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ) AS submit_pending
         FROM applications
         JOIN jobs ON jobs.id = applications.job_id
         LEFT JOIN companies ON companies.id = jobs.company_id
@@ -776,19 +868,24 @@ def create_run(conn: sqlite3.Connection, *, trigger: str, mode: str = "full") ->
     return cur.lastrowid
 
 
-def close_interrupted_runs(conn: sqlite3.Connection, *, closed_by_run_id: int) -> int:
+def close_interrupted_runs(
+    conn: sqlite3.Connection, *, closed_by_run_id: int, keep_ids: tuple[int, ...] = ()
+) -> int:
     """Close run rows that never got a finished_at (the process died). Only
-    call while holding the run lock, so no live run can be hit."""
+    call while holding the run lock, so no live run can be hit. `keep_ids`
+    are runs left open on purpose (a pilot window the PC worker works through)."""
     now = now_iso()
+    skip = (closed_by_run_id, *keep_ids)
+    placeholders = ", ".join("?" for _ in skip)
     cur = conn.execute(
         "UPDATE runs SET finished_at = ?, "
         "log = COALESCE(log, '') || ? "
-        "WHERE finished_at IS NULL AND id != ?",
+        f"WHERE finished_at IS NULL AND id NOT IN ({placeholders})",
         (
             now,
             f"\n[{now}] Interrupted: the process exited before this run finished. "
             f"Closed by run {closed_by_run_id}.",
-            closed_by_run_id,
+            *skip,
         ),
     )
     conn.commit()
@@ -797,14 +894,109 @@ def close_interrupted_runs(conn: sqlite3.Connection, *, closed_by_run_id: int) -
 
 def requeue_interrupted_applying_jobs(conn: sqlite3.Connection) -> int:
     """Put jobs left in 'applying' by an interrupted run back in the queue,
-    except those with an application that is legitimately waiting or done."""
+    except those with an application that is legitimately waiting or done and
+    those the PC worker holds under a live lease. Expired worker leases go
+    through `expire_worker_leases` first, so their lease columns are cleared
+    and a fill placeholder is failed."""
+    expired = expire_worker_leases(conn, now_iso())
     cur = conn.execute(
-        "UPDATE jobs SET status = 'queued' WHERE status = 'applying' AND id NOT IN ("
+        "UPDATE jobs SET status = 'queued' WHERE status = 'applying' "
+        "AND worker_lease_until IS NULL AND id NOT IN ("
         "SELECT job_id FROM applications "
-        "WHERE status IN ('ready_to_submit', 'sent', 'replied', 'interview'))"
+        "WHERE status IN ('ready_to_submit', 'sent', 'replied', 'interview'))",
     )
     conn.commit()
-    return cur.rowcount
+    return expired + cur.rowcount
+
+
+# --- PC worker leases ---------------------------------------------------
+
+def claim_job(
+    conn: sqlite3.Connection, job_id: int, *, lease_until: str, lease_token: str, phase: str,
+    application_id: int,
+) -> bool:
+    """Atomically take a queued job for the PC worker. False when another
+    caller (the scheduled run, the dashboard, a second worker) got it first."""
+    cur = conn.execute(
+        "UPDATE jobs SET status = 'applying', worker_phase = ?, worker_lease_until = ?, "
+        "worker_lease_token = ?, worker_application_id = ? WHERE id = ? AND status = 'queued'",
+        (phase, lease_until, lease_token, application_id, job_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def extend_lease(conn: sqlite3.Connection, job_id: int, lease_token: str, lease_until: str) -> bool:
+    cur = conn.execute(
+        "UPDATE jobs SET worker_lease_until = ? WHERE id = ? AND worker_lease_token = ? "
+        "AND status = 'applying' AND worker_lease_until >= ?",
+        (lease_until, job_id, lease_token, now_iso()),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def clear_lease(conn: sqlite3.Connection, job_id: int) -> None:
+    conn.execute(
+        "UPDATE jobs SET worker_lease_until = NULL, worker_lease_token = NULL, "
+        "worker_application_id = NULL, worker_phase = NULL WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+
+
+def expire_worker_leases(conn: sqlite3.Connection, now: str) -> int:
+    """Return jobs whose worker lease ran out to the queue. The phase is
+    kept so a submit session is retried as a submit session; a fill-phase
+    placeholder application becomes `failed`."""
+    rows = conn.execute(
+        "SELECT id, worker_phase, worker_application_id FROM jobs "
+        "WHERE status = 'applying' AND worker_lease_until IS NOT NULL AND worker_lease_until < ?",
+        (now,),
+    ).fetchall()
+    for row in rows:
+        if row["worker_phase"] == "fill" and row["worker_application_id"] is not None:
+            conn.execute(
+                "UPDATE applications SET status = 'failed', notes = ? WHERE id = ?",
+                ("PC worker lease expired without a result.", row["worker_application_id"]),
+            )
+        conn.execute(
+            "UPDATE jobs SET status = 'queued', worker_lease_until = NULL, worker_lease_token = NULL "
+            "WHERE id = ?",
+            (row["id"],),
+        )
+    conn.commit()
+    return len(rows)
+
+
+def release_lease(conn: sqlite3.Connection, job_id: int) -> None:
+    """Back to the queue, phase kept, lease cleared."""
+    conn.execute(
+        "UPDATE jobs SET status = 'queued', worker_lease_until = NULL, worker_lease_token = NULL "
+        "WHERE id = ?",
+        (job_id,),
+    )
+    conn.commit()
+
+
+def queue_worker_submit(conn: sqlite3.Connection, job_id: int, application_id: int) -> bool:
+    """Queue a submit session for the PC worker. False (nothing changed)
+    while a submit is already queued or the worker holds a live lease."""
+    cur = conn.execute(
+        "UPDATE jobs SET status = 'queued', worker_phase = 'submit', worker_application_id = ?, "
+        "worker_lease_until = NULL, worker_lease_token = NULL WHERE id = ? "
+        "AND COALESCE(worker_phase, '') != 'submit' "
+        "AND (worker_lease_token IS NULL OR worker_lease_until IS NULL OR worker_lease_until < ?)",
+        (application_id, job_id, now_iso()),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def delete_application(conn: sqlite3.Connection, application_id: int) -> None:
+    conn.execute("DELETE FROM proofs WHERE application_id = ?", (application_id,))
+    conn.execute("DELETE FROM applications WHERE id = ?", (application_id,))
+    conn.commit()
 
 
 def update_run_log(conn: sqlite3.Connection, run_id: int, log: str) -> None:

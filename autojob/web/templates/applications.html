@@ -41,10 +41,16 @@
         </td>
         <td>
           {% if a.status == "ready_to_submit" %}
+          {% if a.submit_pending %}
+          <span>Submit queued</span>
+          {% elif a.is_pilot %}
+          <a href="/applications/{{ a.id }}">Review to release</a>
+          {% else %}
           <form method="post" action="/applications/{{ a.id }}/release" class="apply-now-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="link-button">Release</button>
           </form>
+          {% endif %}
           <form method="post" action="/applications/{{ a.id }}/discard" class="apply-now-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="link-button">Discard</button>

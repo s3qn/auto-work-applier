@@ -1,0 +1,10 @@
+[Unit]
+Description=auto-job overnight pilot at 02:00 Asia/Jerusalem
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Jerusalem
+Persistent=false
+Unit=autojob-pilot.service
+
+[Install]
+WantedBy=timers.target

@@ -152,6 +152,8 @@ def active_section(path: str) -> str:
         return "runs"
     if path.startswith("/browser"):
         return "browser"
+    if path.startswith("/pilot"):
+        return "pilot"
     if path.startswith("/profile"):
         return "profile"
     return ""

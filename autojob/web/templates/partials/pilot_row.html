@@ -1,0 +1,37 @@
+<div class="card pilot-row" id="pilot-row-{{ a.id }}">
+  <div class="pilot-row-head">
+    <strong>{{ a.job_title }}</strong>{% if a.company_name %} at {{ a.company_name }}{% endif %}
+    <span class="chip chip-{{ a.status }}">{{ a.status }}</span>
+    <span class="pilot-channel">{{ a.channel }}</span>
+    {% if a.pilot_verdict %}<span class="badge">{{ a.pilot_verdict }}</span>{% endif %}
+  </div>
+  {% if a.notes %}<p class="pilot-reason">{{ a.notes }}</p>{% endif %}
+  {% if answers %}
+  <details>
+    <summary>{{ answers|length }} answer{{ '' if answers|length == 1 else 's' }} filled</summary>
+    <ul>
+      {% for question, value in answers %}<li>{{ question }}: {{ value }}</li>{% endfor %}
+    </ul>
+  </details>
+  {% else %}
+  <p class="pilot-reason">0 answers filled</p>
+  {% endif %}
+  {% if screenshots %}
+  <div class="pilot-shots">
+    {% for p in screenshots %}
+    <a href="/applications/{{ a.id }}/proofs/{{ p.id }}"><img src="/applications/{{ a.id }}/proofs/{{ p.id }}" alt="Screenshot" loading="lazy"></a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="status-buttons">
+    <a href="/applications/{{ a.id }}">Open application</a>
+    {% for value, label in [('right', 'Looks right'), ('wrong', 'Looks wrong'), ('clear', 'Clear')] %}
+    <form method="post" action="/pilot/{{ a.id }}/verdict"
+          hx-post="/pilot/{{ a.id }}/verdict" hx-target="#pilot-row-{{ a.id }}" hx-swap="outerHTML">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="verdict" value="{{ value }}">
+      <button type="submit" class="{{ 'status-btn-active' if a.pilot_verdict == value else '' }}">{{ label }}</button>
+    </form>
+    {% endfor %}
+  </div>
+</div>

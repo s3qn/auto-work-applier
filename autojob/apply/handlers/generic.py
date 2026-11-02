@@ -45,8 +45,17 @@ MAPPING_TIMEOUT = 180
 NAV_WAIT_MS = 2000
 SETTLE_TIMEOUT_MS = 5000
 MAX_HARVEST_FIELDS = 60
-FORM_FIELD_THRESHOLD = 2
-MAX_EASY_APPLY_STEPS = 8
+FORM_FIELD_THRESHOLD = 3
+# Footer newsletter boxes, site search and nav widgets are never an
+# application form: harvest skips any field inside one of these.
+EXCLUDED_CONTAINER_JS = (
+    "el => !!el.closest('footer, nav, header, aside, [role=search], form[role=search], "
+    "form[action*=search i], form[action*=subscribe i], form[action*=newsletter i], "
+    "form[id*=newsletter i], form[class*=newsletter i], form[class*=subscribe i]')"
+)
+EASY_APPLY_ONLY_REASON = (
+    "LinkedIn listing only offers Easy Apply, which this build never automates. Apply by hand: {url}"
+)
 
 ALLJOBS_UPLOAD_MARKER = "alljobs.co.il/search/uploadsingle"
 LINKEDIN_JOB_MARKER = "linkedin.com/jobs/view"
@@ -69,8 +78,6 @@ LOGIN_TEXT_MARKERS = (
     "sign in", "log in", "login", "התחבר", "התחברות", "כניסה לאתר", "הרשמה",
 )
 CAPTCHA_URL_MARKERS = ("recaptcha", "hcaptcha", "captcha", "turnstile")
-NEXT_STEP_PATTERNS = ("next", "continue", "review", "הבא", "המשך")
-SUBMIT_APPLICATION_PATTERNS = ("submit application", "שלח מועמדות", "submit")
 SUBMIT_TEXT_PATTERNS = ("submit", "send application", "שלח", "הגש")
 COVER_LETTER_LABEL_MARKERS = ("cover letter", "motivation", "מכתב מקדים", "מכתב פנייה")
 
@@ -162,7 +169,7 @@ def _reach_application_form(page):
         return page
     affordance = find_apply_affordance(page)
     if affordance is None:
-        return page if _has_any_field(page) else None
+        return page if _looks_like_form(page) else None
     try:
         affordance.click()
     except Exception:
@@ -178,7 +185,7 @@ def _reach_application_form(page):
         _settle(popup)
         if _looks_like_form(popup):
             return popup
-    return page if _has_any_field(page) else None
+    return page if _looks_like_form(page) else None
 
 
 def find_apply_affordance(scope):
@@ -187,7 +194,7 @@ def find_apply_affordance(scope):
     return _find_button_by_text(scope, APPLY_TEXT_PATTERNS)
 
 
-def _find_button_by_text(scope, patterns):
+def _find_button_by_text(scope, patterns, exclude=()):
     try:
         candidates = scope.query_selector_all(CLICKABLE_SELECTOR)
     except Exception:
@@ -198,22 +205,30 @@ def _find_button_by_text(scope, patterns):
         text = _text_content(el).lower()
         aria = _safe_attr(el, "aria-label").lower()
         combined = f"{text} {aria}"
+        if any(pattern in combined for pattern in exclude):
+            continue
         if any(pattern in combined for pattern in patterns):
             return el
     return None
 
 
-def _field_count(scope) -> int:
-    fields, _ = harvest_fields(scope)
-    return len(fields)
-
-
 def _looks_like_form(scope) -> bool:
-    return _field_count(scope) >= FORM_FIELD_THRESHOLD
+    """At least three fields, or two when one of them is a file input (a
+    name plus a CV upload is a real, if short, application form)."""
+    fields, _ = harvest_fields(scope)
+    if len(fields) >= FORM_FIELD_THRESHOLD:
+        return True
+    return len(fields) >= 2 and any(f.get("type") == "file" for f in fields)
 
 
-def _has_any_field(scope) -> bool:
-    return _field_count(scope) >= 1
+def _in_excluded_container(el) -> bool:
+    evaluate = getattr(el, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    try:
+        return bool(evaluate(EXCLUDED_CONTAINER_JS))
+    except Exception:
+        return False
 
 
 def _find_form_frame(page):
@@ -289,7 +304,7 @@ def harvest_fields(scope) -> tuple[list[dict], dict]:
     for el in inputs:
         if len(fields) >= MAX_HARVEST_FIELDS:
             return fields, elements
-        if not _visible(el):
+        if not _visible(el) or _in_excluded_container(el):
             continue
         input_type = (_safe_attr(el, "type") or "text").lower()
         name = _safe_attr(el, "name")
@@ -326,7 +341,7 @@ def harvest_fields(scope) -> tuple[list[dict], dict]:
         for el in textareas:
             if len(fields) >= MAX_HARVEST_FIELDS:
                 break
-            if not _visible(el):
+            if not _visible(el) or _in_excluded_container(el):
                 continue
             label = _label_for(scope, el)
             key = next_key()
@@ -344,7 +359,7 @@ def harvest_fields(scope) -> tuple[list[dict], dict]:
         for el in selects:
             if len(fields) >= MAX_HARVEST_FIELDS:
                 break
-            if not _visible(el):
+            if not _visible(el) or _in_excluded_container(el):
                 continue
             label = _label_for(scope, el)
             key = next_key()
@@ -638,13 +653,12 @@ def _handle_linkedin(page, answers, cv_path, auto_submit, job_context, work_dir)
     if _looks_logged_out(page):
         return {"status": "needs_help", "reason": "LinkedIn login required to apply."}
 
-    easy_apply = _find_button_by_text(page, ("easy apply",))
-    if easy_apply is not None:
-        return _walk_easy_apply(page, easy_apply, answers, cv_path, auto_submit, job_context, work_dir)
-
-    external = find_apply_affordance(page)
+    external = _find_button_by_text(page, APPLY_TEXT_PATTERNS, exclude=("easy apply",))
     if external is None:
-        return {"status": "needs_help", "reason": "Could not locate an application entry point on this LinkedIn listing."}
+        return {
+            "status": "needs_help",
+            "reason": EASY_APPLY_ONLY_REASON.format(url=_current_url(page)),
+        }
     try:
         external.click()
     except Exception:
@@ -655,62 +669,16 @@ def _handle_linkedin(page, answers, cv_path, auto_submit, job_context, work_dir)
     if delegated is not None:
         return delegated
 
-    scope = page if _has_any_field(page) else _find_form_frame(page)
+    scope = page if _looks_like_form(page) else _find_form_frame(page)
     if scope is None:
         popup = _newest_popup(page)
-        scope = popup if popup is not None and _has_any_field(popup) else None
+        scope = popup if popup is not None and _looks_like_form(popup) else None
     if scope is None:
         return {
             "status": "needs_help",
             "reason": "Could not locate an application form after following the external apply link.",
         }
     return _harvest_map_fill(scope, answers, cv_path, auto_submit, job_context, work_dir)
-
-
-def _walk_easy_apply(page, easy_apply_button, answers, cv_path, auto_submit, job_context, work_dir) -> dict:
-    try:
-        easy_apply_button.click()
-    except Exception:
-        return {"status": "needs_help", "reason": "Could not open LinkedIn's Easy Apply form."}
-    _settle(page)
-
-    all_escalated: list[str] = []
-    for _step in range(MAX_EASY_APPLY_STEPS):
-        if _detect_captcha(page):
-            return {"status": "needs_help", "reason": "CAPTCHA on form."}
-
-        submit_button = _find_button_by_text(page, SUBMIT_APPLICATION_PATTERNS)
-        fields, elements = harvest_fields(page)
-        if fields:
-            mapping = _map_fields(fields, answers, job_context, work_dir)
-            all_escalated.extend(_apply_mapping(fields, elements, mapping))
-            _fill_file_inputs(fields, elements, cv_path, answers.get("cover_letter_file"))
-
-        if submit_button is not None:
-            if all_escalated:
-                reason = (
-                    "LinkedIn Easy Apply has question(s) with no honest basis to answer: "
-                    + "; ".join(all_escalated[:5])
-                )
-                return {"status": "needs_help", "reason": reason}
-            if not auto_submit:
-                return {"status": "ready_to_submit", "reason": None}
-            try:
-                submit_button.click()
-            except Exception as exc:  # noqa: BLE001 - report exactly what went wrong
-                return {"status": "needs_help", "reason": f"Could not click LinkedIn's submit control: {exc}"}
-            return {"status": "sent", "reason": None}
-
-        next_button = _find_button_by_text(page, NEXT_STEP_PATTERNS)
-        if next_button is None:
-            break
-        try:
-            next_button.click()
-        except Exception:
-            break
-        _settle(page)
-
-    return {"status": "needs_help", "reason": "LinkedIn Easy Apply had too many steps to complete automatically."}
 
 
 # --- small duck-typed helpers, tolerant of both real Playwright objects

@@ -16,9 +16,12 @@ from starlette.templating import Jinja2Templates
 from autojob import auth, db
 from autojob.config import Config, load_config
 from autojob.web.routes import router
+from autojob.web.worker_routes import router as worker_router
 
 WEB_DIR = Path(__file__).resolve().parent
 PUBLIC_PATHS = {"/login", "/logout", "/healthz"}
+# The PC worker authenticates with a bearer token inside the route instead.
+TOKEN_AUTH_PREFIX = "/api/worker/"
 
 
 class RequireLoginMiddleware(BaseHTTPMiddleware):
@@ -26,7 +29,7 @@ class RequireLoginMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path in PUBLIC_PATHS or path.startswith("/static/"):
+        if path in PUBLIC_PATHS or path.startswith("/static/") or path.startswith(TOKEN_AUTH_PREFIX):
             return await call_next(request)
         if request.session.get("logged_in"):
             return await call_next(request)
@@ -63,4 +66,5 @@ def create_app(config: Config | None = None) -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(worker_router)
     return app

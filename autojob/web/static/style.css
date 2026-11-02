@@ -627,3 +627,10 @@ form button[type=submit] {
   border-radius: 12px;
   overflow: hidden;
 }
+
+/* Pilot review */
+.pilot-row { margin-bottom: 12px; }
+.pilot-row-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pilot-channel, .pilot-reason { font-size: 13px; opacity: 0.8; }
+.pilot-shots { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.pilot-shots img { height: 120px; width: auto; border: 1px solid #ccc; border-radius: 4px; }

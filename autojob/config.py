@@ -39,6 +39,10 @@ class Config:
         return self.data_dir / "smtp.json"
 
     @property
+    def worker_token_path(self) -> Path:
+        return self.data_dir / "worker_token.json"
+
+    @property
     def run_lock_path(self) -> Path:
         return self.data_dir / "run.lock"
 

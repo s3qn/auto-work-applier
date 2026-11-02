@@ -152,11 +152,15 @@ application:
      password fields), "AllJobs login required" / "LinkedIn login required"
      (a visible sign-in affordance on the persistent browser profile), or
      "Could not locate an application form on this page."
-  LinkedIn gets its own path inside the same module: Easy Apply is walked
-  step by step (harvest, map, fill, click Next/Review, repeat, capped at 8
-  steps), an external apply link is followed and re-detected the same way
-  as a company career page, and either path escalates "LinkedIn login
-  required" up front if the persistent profile has no session.
+  LinkedIn gets its own path inside the same module: Easy Apply is never
+  automated. An external apply link (an `APPLY_TEXT_PATTERNS` match whose
+  text and aria-label lack "easy apply") is followed and re-detected the
+  same way as a company career page; a listing that only offers Easy Apply
+  returns `needs_help` with "Apply by hand: <listing url>". A logged-out
+  profile escalates "LinkedIn login required" up front. A page counts as a
+  form only with at least 3 harvested fields (2 when one is a file input),
+  and `harvest_fields` skips fields inside a footer, nav, header, aside or
+  search/newsletter/subscribe form, so a newsletter box is never filled.
 - `apply.py`'s `requeue_stale_no_handler_jobs(conn)` is a one-time,
   idempotent maintenance function: before `handlers/generic.py` existed, a
   job on an unrecognized ATS was escalated to `needs_help` with reason "No
@@ -225,6 +229,76 @@ application:
   the daily cap counts distinct applications with a `sent_email` proof since
   local midnight.
 
+## PC worker
+
+Jobs that need a logged-in browser are applied to by a Claude agent on
+Sean's PC (`worker/`, self-contained, no `autojob` import, copied to the PC;
+see `worker/README.md`). The server stays the brain: scan, filter, research,
+queue, proofs, dashboard and the email channel.
+
+- **Token.** `uv run python -m autojob.set_worker_token [--rotate]` prints a
+  token once and stores only its sha256 in `data/worker_token.json` (0600).
+  `autojob/worker_token.py` has `worker_configured` and `verify_worker_token`.
+  With no token file nothing below applies: no partition, no routes in use.
+- **Partition.** A queued job is a worker job when any page channel from
+  `plan_channels` is not a known ATS (`pick_handler_by_url` is None), or it
+  waits for a submit session. With a token, `_run_apply_phase` skips worker
+  jobs ("N job(s) left for the PC worker") and keeps ATS-only and email-only
+  jobs. `remote.is_worker_job` is the one test.
+- **Claim and lease.** `POST /api/worker/claim` (`Authorization: Bearer
+  <token>`, `autojob/web/worker_routes.py`, outside the login middleware)
+  expires stale leases, picks a submit-phase job first and then a fill job
+  (per-source daily cap respected), builds the answers and cover letter like
+  `apply_to_job`, creates a placeholder application and takes the job with a
+  conditional `UPDATE ... WHERE status='queued'` (`db.claim_job`), so the
+  scheduled run, the dashboard and the worker never double-take. 204 when
+  nothing is claimable. The lease (`jobs.worker_lease_until`,
+  `worker_lease_token`, `worker_phase`, `worker_application_id`) lasts 15
+  minutes and is extended by `POST /jobs/{id}/heartbeat`. An expired lease
+  returns the job to `queued` and fails a fill placeholder ("PC worker lease
+  expired without a result."); `requeue_interrupted_applying_jobs` leaves a
+  live-leased job alone.
+- **Routes.** `GET /api/worker/cv`; `POST /jobs/{id}/attempts` (multipart:
+  `lease_token`, `payload` JSON, `screenshots[]` PNG up to 8 MB, 10 files,
+  saved as proofs under `data/applications/<id>/`); `POST /jobs/{id}/release`
+  (job back to `queued`, an empty placeholder is deleted, otherwise failed).
+  The attempt payload carries `index`, `kind`, `target`, `session`, `status`
+  (`filled|submitted|needs_help|failed`), `reason_code`, `reason`,
+  `final_url`, `fields_filled`, `unanswered_required`, `cv_uploaded`,
+  `denied_tool_calls`, `tool_calls`. `remote.REASON_TEXT` turns a
+  `reason_code` into the canonical reason text so `FALL_THROUGH_MARKERS` stays
+  as is; `unanswered_required` forces `unanswerable`. `filled` becomes
+  `ready_to_submit`, `submitted` becomes `sent`.
+- **Fall-through and email.** The worker reports one attempt per page
+  channel; `remote.record_attempt` uses `_should_fall_through` and answers
+  `{"next_index": n}` or `{"done": true, "status": ...}`. For worker jobs
+  email is tried last, after every page channel including `job_url`, by the
+  server (`_attempt_email_channel`). The channel label is
+  `agent:<domain of the final url>`.
+- **Release.** Releasing an `agent:` application queues a submit session
+  (`worker_phase='submit'`); the next claim returns `phase: submit` with
+  `submit_allowed: true` and the one saved channel. The detail page shows
+  "Queued for the PC worker." The run log header shows "PC worker last seen"
+  or "PC worker: never connected" (setting `worker_last_seen`) once a token
+  exists.
+- **Pilot.** With a token, a pilot ("Run pilot now", or the 02:00
+  `pilot_tonight` claim) applies nothing on the server: `run_scan` creates
+  the `runs` row (`mode='pilot'`), and `remote.open_pilot` stores the window
+  in setting `worker_pilot` (`run_id`, `cap`, `until` = next 07:00
+  Asia/Jerusalem) and leaves the run open. While it is open, a claim hands
+  out fills only (any queued job, ATS ones included, no daily cap, no
+  submit sessions), at most `pilot_cap` applications, each created with
+  `run_id` set and `submit_allowed: false`, so `/pilot` lists them with
+  their screenshots. The run finishes (`remote.active_pilot`, checked on
+  every claim, attempt, `/pilot` view and run start) once the cap is used
+  and nothing is in flight, or at the first check after 07:00. The
+  interrupted-run reaper leaves an open window alone. Without a token the
+  pilot runs on the server as before.
+- **Schedule.** The worker's Task Scheduler task (`install-task.ps1`) runs
+  `worker.py --once` daily at 02:05, five minutes after the 02:00 pilot
+  timer opens the window, and `max_minutes` 300 ends it near 07:00. Keep
+  `max_jobs` at or above the pilot cap (the example config uses 20).
+
 **Safety default: `auto_submit` (settings key, default `false`).** When
 off, a handler fills the whole form, takes its screenshot, and stops before
 the final submit click; the application waits as `ready_to_submit` for Sean
@@ -260,6 +334,8 @@ this repo. Running from the repo root would load this repo's own
 `CLAUDE.md`, `AGENTS.md`, and `.claude/` hooks into the CLI's context,
 which would corrupt the job-screening and company-research prompts. Any
 new claude CLI caller must follow the same rule.
+
+The PC worker's claude runs on the PC through the Claude Agent SDK, with the same throwaway-cwd rule (its own `llm-work` folder, never a repo).
 
 On a timeout, non-JSON output, or malformed response, both callers fail
 soft instead of raising past the pipeline: `filter_jobs` marks the job

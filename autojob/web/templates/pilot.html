@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Pilot - auto-job{% endblock %}
+{% block content %}
+<h1>Pilot</h1>
+<div class="card">
+  <p>A pilot tries up to {{ pilot_cap }} queued jobs without submitting anything. Jobs it fills leave the queue, so the daily run will not retry them.</p>
+  {% if worker_connected %}<p>With the PC worker connected, Run pilot now opens a window the PC fills at its next 02:05 run. Until that window closes at 07:00, the worker holds Release submits.</p>{% endif %}
+  {% if busy %}<p>Another run is in progress. Try again when it finishes.</p>{% endif %}
+  {% if worker_pilot %}<p>Pilot #{{ worker_pilot.run_id }} is open on the PC worker: {{ worker_pilot.used }} of {{ worker_pilot.cap }} job(s) claimed. It closes when the cap is used or at 07:00.</p>{% endif %}
+  {% if started %}<p>Pilot started. <a href="/runs/live">Watch it live</a>.</p>{% endif %}
+  <form method="post" action="/pilot/run">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" {% if queued_count == 0 %}disabled{% endif %}>Run pilot now</button>
+    {% if queued_count == 0 %}<span class="pilot-reason">Disabled: no queued jobs.</span>{% else %}<span class="pilot-reason">{{ queued_count }} queued.</span>{% endif %}
+  </form>
+  <form method="post" action="/pilot/tonight">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label><input type="checkbox" name="enabled" value="on" {% if pilot_tonight %}checked{% endif %} onchange="this.form.submit()"> Run pilot tonight at 02:00</label>
+    <noscript><button type="submit">Save</button></noscript>
+  </form>
+  <form method="post" action="/pilot/cap">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Job cap (1 to 100) <input type="number" name="cap" min="1" max="100" value="{{ pilot_cap }}"></label>
+    <button type="submit">Save cap</button>
+  </form>
+</div>
+
+{% if run_id is none %}
+<p class="empty-state">No pilot has run yet. It tries up to 20 queued jobs without submitting anything.</p>
+{% else %}
+<div class="card">
+  <form method="get" action="/pilot">
+    <label>Pilot run
+      <select name="run" onchange="this.form.submit()">
+        {% for r in pilot_runs %}<option value="{{ r.id }}" {% if r.id == run_id %}selected{% endif %}>#{{ r.id }} {{ r.started_at }}</option>{% endfor %}
+      </select>
+    </label>
+  </form>
+  {% if summary %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Channel</th><th>Right</th><th>Wrong</th><th>Unreviewed</th><th>Success</th></tr></thead>
+    <tbody>
+      {% for g in summary %}
+      <tr>
+        <td>{{ g.channel }}</td><td>{{ g.right }}</td><td>{{ g.wrong }}</td><td>{{ g.unreviewed }}</td>
+        <td>{% if g.percent is none %}not reviewed{% else %}{{ g.percent }}% ({{ g.right }} of {{ g.right + g.wrong }}){% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty-state">This pilot attempted no jobs.</p>
+  {% endif %}
+</div>
+{% for row in rows %}
+{% with a=row.a, screenshots=row.screenshots, answers=row.answers %}{% include "partials/pilot_row.html" %}{% endwith %}
+{% endfor %}
+{% endif %}
+{% endblock %}

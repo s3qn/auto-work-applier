@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -18,7 +19,7 @@ from starlette.templating import Jinja2Templates
 from autojob import auth, db
 from autojob.browser import display, login
 from autojob.browser.context import _BROWSER_LOCK, LOGIN_URLS
-from autojob.apply import mailer
+from autojob.apply import mailer, remote
 from autojob.config import Config
 from autojob.pipeline import events
 from autojob.pipeline import lock as runlock
@@ -28,6 +29,7 @@ from autojob.web.deps import (
     base_context,
     get_auto_submit,
     get_browser_visible_mode,
+    JERUSALEM,
     get_config,
     get_db,
     get_email_daily_cap,
@@ -143,6 +145,8 @@ def application_detail(
     ctx = base_context(request, conn)
     ctx["application"] = application
     ctx["proofs"] = db.list_proofs(conn, application_id)
+    job_row = db.get_job_with_company(conn, application["job_id"])
+    ctx["worker_phase"] = job_row["worker_phase"] if job_row is not None else None
     email_draft = None
     if application["email_draft"]:
         try:
@@ -226,15 +230,23 @@ def application_release(
     application_id: int,
     request: Request,
     csrf_token: str = Form(...),
+    pilot_checked: str = Form(""),
     conn=Depends(get_db),
     config: Config = Depends(get_config),
 ):
     verify_csrf_or_403(request, csrf_token)
-    application = db.get_application(conn, application_id)
+    application = db.get_application_with_job(conn, application_id)
     if application is None:
         raise HTTPException(status_code=404, detail="Application not found.")
     if application["status"] != "ready_to_submit":
         raise HTTPException(status_code=400, detail="Only a ready-to-submit application can be released.")
+    if application["is_pilot"] and pilot_checked != "on":
+        raise HTTPException(status_code=400, detail="Confirm you checked the pilot screenshots before releasing.")
+    if application["submit_pending"]:
+        raise HTTPException(
+            status_code=409,
+            detail="A submit for this application is already queued or running on the PC worker.",
+        )
     lock: threading.Lock = request.app.state.run_lock
     if runlock.run_active(config) or not lock.acquire(blocking=False):
         return RedirectResponse(f"/applications/{application_id}?busy=1", status_code=303)
@@ -372,6 +384,11 @@ def job_apply_now(
     job = db.get_job_with_company(conn, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
+    if job["status"] == "applying" or job["worker_lease_token"] or job["worker_phase"] == "submit":
+        raise HTTPException(
+            status_code=409,
+            detail="This job is already being applied to (or is held by the PC worker).",
+        )
     if runlock.run_active(config):
         return RedirectResponse(f"/jobs/{job_id}?busy=1", status_code=303)
     auto_submit = get_auto_submit(conn)
@@ -536,14 +553,31 @@ def targets_post(
 
 # --- run log -------------------------------------------------------------
 
+def _worker_line(config: Config, conn) -> str | None:
+    """Header line for the run log, only once a worker token exists."""
+    from autojob import worker_token
+    if not worker_token.worker_configured(config):
+        return None
+    seen = db.get_setting(conn, "worker_last_seen")
+    if not seen:
+        return "PC worker: never connected"
+    try:
+        moment = datetime.strptime(seen, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "PC worker: never connected"
+    return "PC worker last seen: " + moment.astimezone(JERUSALEM).strftime("%Y-%m-%d %H:%M")
+
+
 @router.get("/runs")
 def runs_list(
     request: Request,
+    config: Config = Depends(get_config),
     conn=Depends(get_db),
     templates: Jinja2Templates = Depends(get_templates),
 ):
     ctx = base_context(request, conn)
     ctx["runs"] = db.list_runs(conn)
+    ctx["worker_line"] = _worker_line(config, conn)
     return templates.TemplateResponse(request, "runs.html", ctx)
 
 
@@ -955,6 +989,127 @@ async def browser_ws(websocket: WebSocket):
             await websocket.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+
+# --- overnight pilot ------------------------------------------------------
+
+def _filled_answers(application) -> list[tuple[str, str]]:
+    """Question and value pairs from the stored screening answers."""
+    try:
+        data = json.loads(application["answers_json"] or "null")
+    except (TypeError, ValueError):
+        return []
+    if isinstance(data, dict):
+        return [(str(k), str(v)) for k, v in data.items() if v not in (None, "")]
+    if isinstance(data, list):
+        return [(str(i + 1), str(v)) for i, v in enumerate(data) if v not in (None, "")]
+    return []
+
+
+def _pilot_row_ctx(conn, application_id: int) -> dict:
+    application = db.get_application_with_job(conn, application_id)
+    if application is None:
+        raise HTTPException(status_code=404, detail="Application not found.")
+    proofs = [p for p in db.list_proofs(conn, application_id) if p["kind"] == "screenshot"]
+    return {"a": application, "screenshots": proofs, "answers": _filled_answers(application)}
+
+
+@router.get("/pilot")
+def pilot_get(
+    request: Request,
+    run: int | None = None,
+    conn=Depends(get_db),
+    config: Config = Depends(get_config),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    from autojob import worker_token
+
+    ctx = base_context(request, conn)
+    ctx["worker_pilot"] = remote.active_pilot(conn)
+    ctx["worker_connected"] = worker_token.worker_configured(config)
+    pilot_runs = db.list_pilot_runs(conn)
+    pilot_ids = {r["id"] for r in pilot_runs}
+    if run is not None and run not in pilot_ids:
+        raise HTTPException(status_code=404, detail="Pilot run not found.")
+    run_id = run if run is not None else db.latest_pilot_run_id(conn)
+    ctx["pilot_runs"] = pilot_runs
+    ctx["run_id"] = run_id
+    ctx["rows"] = []
+    ctx["summary"] = []
+    if run_id is not None:
+        ctx["rows"] = [_pilot_row_ctx(conn, a["id"]) for a in db.list_pilot_applications(conn, run_id)]
+        ctx["summary"] = db.pilot_summary(conn, run_id)
+    ctx["queued_count"] = len(db.list_jobs_with_company(conn, status="queued"))
+    ctx["pilot_cap"] = run_module.get_pilot_cap(conn)
+    ctx["pilot_tonight"] = bool(db.get_setting(conn, "pilot_tonight", False))
+    ctx["busy"] = request.query_params.get("busy") == "1"
+    ctx["started"] = request.query_params.get("started") == "1"
+    return templates.TemplateResponse(request, "pilot.html", ctx)
+
+
+@router.post("/pilot/run")
+def pilot_run(
+    request: Request,
+    csrf_token: str = Form(...),
+    config: Config = Depends(get_config),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    lock: threading.Lock = request.app.state.run_lock
+    if runlock.run_active(config) or not lock.acquire(blocking=False):
+        return RedirectResponse("/pilot?busy=1", status_code=303)
+    thread = threading.Thread(target=_run_scan_and_release, args=(lock, "pilot"), daemon=True)
+    thread.start()
+    return RedirectResponse("/pilot?started=1", status_code=303)
+
+
+@router.post("/pilot/tonight")
+def pilot_tonight(
+    request: Request,
+    csrf_token: str = Form(...),
+    enabled: str = Form(""),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    db.set_setting(conn, "pilot_tonight", enabled == "on")
+    return RedirectResponse("/pilot", status_code=303)
+
+
+@router.post("/pilot/cap")
+def pilot_cap(
+    request: Request,
+    csrf_token: str = Form(...),
+    cap: int = Form(...),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    if not 1 <= cap <= 100:
+        raise HTTPException(status_code=400, detail="Cap must be between 1 and 100.")
+    db.set_setting(conn, "pilot_cap", cap)
+    return RedirectResponse("/pilot", status_code=303)
+
+
+@router.post("/pilot/{application_id}/verdict")
+def pilot_verdict(
+    application_id: int,
+    request: Request,
+    csrf_token: str = Form(...),
+    verdict: str = Form(...),
+    conn=Depends(get_db),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    verify_csrf_or_403(request, csrf_token)
+    if verdict not in ("right", "wrong", "clear"):
+        raise HTTPException(status_code=400, detail="Verdict must be right, wrong or clear.")
+    if db.get_application(conn, application_id) is None:
+        raise HTTPException(status_code=404, detail="Application not found.")
+    db.set_pilot_verdict(conn, application_id, None if verdict == "clear" else verdict)
+    if request.headers.get("HX-Request"):
+        ctx = base_context(request, conn)
+        ctx.update(_pilot_row_ctx(conn, application_id))
+        return templates.TemplateResponse(request, "partials/pilot_row.html", ctx)
+    return RedirectResponse("/pilot", status_code=303)
 
 
 # --- profile and CV -------------------------------------------------------

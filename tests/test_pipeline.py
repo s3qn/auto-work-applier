@@ -673,3 +673,152 @@ def test_main_skips_when_lock_held(config):
         assert db.list_runs(conn) == []
     finally:
         conn.close()
+
+
+# --- pilot mode ------------------------------------------------------------
+
+def _forbid_scan_filter_research(monkeypatch):
+    called = []
+    monkeypatch.setattr(run_module, "research_pending", lambda *a, **kw: called.append("research") or (0, 0))
+    monkeypatch.setattr(run_module, "_search_source", lambda *a, **kw: called.append("scan") or [])
+    monkeypatch.setattr(llm_filter, "filter_jobs", lambda *a, **kw: called.append("filter") or [])
+    return called
+
+
+def test_pilot_forces_auto_submit_off_and_skips_scan_filter_research(config, monkeypatch):
+    _seed_queued_job(config)
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "auto_submit", True)
+    finally:
+        conn.close()
+    called = _forbid_scan_filter_research(monkeypatch)
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    run_id = run_module.run_scan(trigger="manual", mode="pilot")
+
+    assert called == []
+    assert [c[1] for c in calls] == [False]
+    conn = db.get_connection(config)
+    try:
+        assert db.get_run(conn, run_id)["mode"] == "pilot"
+    finally:
+        conn.close()
+
+
+def test_pilot_cap_limits_attempts(config, monkeypatch):
+    for n in range(1, 6):
+        _seed_queued_job(config, n=n)
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "pilot_cap", 3)
+    finally:
+        conn.close()
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    run_module.run_scan(trigger="manual", mode="pilot")
+
+    assert len(calls) == 3
+
+
+def test_pilot_records_run_id_on_applications(config, monkeypatch):
+    job_id = _seed_queued_job(config)
+    seen = []
+
+    def fake_apply(job, *, auto_submit, run_id=None):
+        conn = db.get_connection(config)
+        try:
+            seen.append(db.create_application(conn, job_id=job["id"], channel="other", run_id=run_id))
+        finally:
+            conn.close()
+        return {"status": "needs_help", "application_id": seen[-1], "reason": "x"}
+
+    monkeypatch.setattr(run_module, "apply_to_job", fake_apply)
+    run_id = run_module.run_scan(trigger="manual", mode="pilot")
+    conn = db.get_connection(config)
+    try:
+        assert db.get_application(conn, seen[0])["run_id"] == run_id
+        assert [r["id"] for r in db.list_pilot_applications(conn, run_id)] == seen
+        assert db.latest_pilot_run_id(conn) == run_id
+    finally:
+        conn.close()
+    assert job_id
+
+
+def test_main_pilot_is_noop_when_toggle_off(config, monkeypatch):
+    _seed_queued_job(config)
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    assert run_module.main(["--pilot"]) == 0
+
+    assert calls == []
+    conn = db.get_connection(config)
+    try:
+        assert db.list_runs(conn) == []
+    finally:
+        conn.close()
+
+
+def test_main_pilot_runs_and_clears_toggle(config, monkeypatch):
+    _seed_queued_job(config)
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "pilot_tonight", True)
+    finally:
+        conn.close()
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    assert run_module.main(["--pilot"]) == 0
+
+    assert len(calls) == 1 and calls[0][1] is False
+    conn = db.get_connection(config)
+    try:
+        assert db.get_setting(conn, "pilot_tonight") is False
+        assert db.latest_pilot_run_id(conn) is not None
+    finally:
+        conn.close()
+
+
+def test_main_pilot_skips_when_lock_held(config):
+    conn = db.get_connection(config)
+    db.init_db(config)
+    db.set_setting(conn, "pilot_tonight", True)
+    conn.close()
+    handle = _hold_lock(config)
+    try:
+        assert run_module.main(["--pilot"]) == 0
+    finally:
+        handle.close()
+
+
+def test_main_pilot_keeps_toggle_when_lock_held(config):
+    db.init_db(config)
+    conn = db.get_connection(config)
+    db.set_setting(conn, "pilot_tonight", True)
+    conn.close()
+    handle = _hold_lock(config)
+    try:
+        assert run_module.main(["--pilot"]) == 0
+    finally:
+        handle.close()
+    conn = db.get_connection(config)
+    try:
+        assert db.get_setting(conn, "pilot_tonight") is True
+    finally:
+        conn.close()
+
+
+def test_claim_setting_flag_succeeds_once(config):
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "pilot_tonight", True)
+        assert db.claim_setting_flag(conn, "pilot_tonight") is True
+        assert db.claim_setting_flag(conn, "pilot_tonight") is False
+        assert db.get_setting(conn, "pilot_tonight") is False
+    finally:
+        conn.close()

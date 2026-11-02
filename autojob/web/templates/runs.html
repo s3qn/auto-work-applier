@@ -2,6 +2,7 @@
 {% block title %}Run log - auto-job{% endblock %}
 {% block content %}
 <h1>Run log</h1>
+{% if worker_line %}<p class="muted">{{ worker_line }}</p>{% endif %}
 <div class="card table-card">
   {% if runs %}
   <div class="table-scroll">

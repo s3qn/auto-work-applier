@@ -73,6 +73,8 @@ def test_migrate_schema_adds_columns_to_legacy_db(config):
         assert db._column_exists(conn, "companies", "channels_researched_at")
         assert db._column_exists(conn, "jobs", "company_site_url")
         assert db._column_exists(conn, "runs", "mode")
+        assert db._column_exists(conn, "applications", "run_id")
+        assert db._column_exists(conn, "applications", "pilot_verdict")
 
         # Running it again must not fail or duplicate anything.
         db.migrate_schema(conn)
@@ -476,5 +478,21 @@ def test_requeue_interrupted_applying_jobs_keeps_ready_to_submit(config):
         assert db.requeue_interrupted_applying_jobs(conn) == 1
         assert db.get_job(conn, ids["a"])["status"] == "queued"
         assert db.get_job(conn, ids["b"])["status"] == "applying"
+    finally:
+        conn.close()
+
+
+def test_migrate_adds_pilot_columns_to_old_applications_table(config):
+    conn = db.get_connection(config)
+    try:
+        conn.executescript(db.SCHEMA)
+        conn.execute("ALTER TABLE applications DROP COLUMN run_id")
+        conn.execute("ALTER TABLE applications DROP COLUMN pilot_verdict")
+        conn.commit()
+        assert not db._column_exists(conn, "applications", "run_id")
+        db.migrate_schema(conn)
+        db.migrate_schema(conn)
+        assert db._column_exists(conn, "applications", "run_id")
+        assert db._column_exists(conn, "applications", "pilot_verdict")
     finally:
         conn.close()

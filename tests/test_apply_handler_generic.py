@@ -17,7 +17,8 @@ from autojob.apply.handlers import generic, greenhouse
 
 
 class FakeElement:
-    def __init__(self, *, attrs=None, text="", visible=True, options=None):
+    def __init__(self, *, attrs=None, text="", visible=True, options=None, excluded=False):
+        self.excluded = excluded
         self.attrs = attrs or {}
         self._text = text
         self.visible = visible
@@ -48,6 +49,9 @@ class FakeElement:
 
     def select_option(self, value=None, label=None):
         self.selected = label if label is not None else value
+
+    def evaluate(self, js):
+        return self.excluded
 
     def text_content(self):
         return self._text
@@ -324,7 +328,7 @@ def test_generic_apply_holds_when_auto_submit_false(monkeypatch, config):
     phone_el = FakeElement(attrs={"id": "phone", "type": "tel"})
     submit_el = FakeElement(text="Submit application")
     page = FakeFormPage(
-        inputs=[email_el, phone_el],
+        inputs=[email_el, phone_el, FakeElement(attrs={"id": "fullname", "type": "text"})],
         clickable=[submit_el],
         labels={"email": FakeElement(text="Email"), "phone": FakeElement(text="Phone")},
         url="https://careers.example.com/job/9",
@@ -348,7 +352,7 @@ def test_generic_apply_submits_when_auto_submit_true(monkeypatch, config):
     phone_el = FakeElement(attrs={"id": "phone", "type": "tel"})
     submit_el = FakeElement(text="Submit application")
     page = FakeFormPage(
-        inputs=[email_el, phone_el],
+        inputs=[email_el, phone_el, FakeElement(attrs={"id": "fullname", "type": "text"})],
         clickable=[submit_el],
         labels={"email": FakeElement(text="Email"), "phone": FakeElement(text="Phone")},
         url="https://careers.example.com/job/9",
@@ -379,7 +383,7 @@ def test_generic_apply_escalates_on_captcha(config):
 
     email_el = FakeElement(attrs={"id": "email", "type": "email"})
     phone_el = FakeElement(attrs={"id": "phone", "type": "tel"})
-    page = FakeFormPage(inputs=[email_el, phone_el], frames=[FrameLike()], url="https://careers.example.com/job/1")
+    page = FakeFormPage(inputs=[email_el, phone_el, FakeElement(attrs={"id": "fullname", "type": "text"})], frames=[FrameLike()], url="https://careers.example.com/job/1")
     result = generic.apply(page, {}, None, auto_submit=False)
     assert result == {"status": "needs_help", "reason": "CAPTCHA on form."}
 
@@ -388,7 +392,7 @@ def test_generic_apply_escalates_on_forced_signup(config):
     email_el = FakeElement(attrs={"id": "email", "type": "email"})
     phone_el = FakeElement(attrs={"id": "phone", "type": "tel"})
     page = FakeFormPage(
-        inputs=[email_el, phone_el],
+        inputs=[email_el, phone_el, FakeElement(attrs={"id": "fullname", "type": "text"})],
         passwords=[FakeElement(), FakeElement()],
         url="https://careers.example.com/job/1",
     )
@@ -416,6 +420,7 @@ def test_generic_apply_delegates_to_a_specific_handler_after_following_the_apply
                     return [
                         FakeElement(attrs={"id": "first_name", "type": "text"}),
                         FakeElement(attrs={"id": "email", "type": "email"}),
+                        FakeElement(attrs={"id": "last_name", "type": "text"}),
                     ]
                 return []
             return []
@@ -451,6 +456,70 @@ def test_generic_apply_delegates_to_a_specific_handler_after_following_the_apply
 
     assert result == fixed_result
     assert calls == [page]
+
+
+# --- form detection threshold, excluded containers, LinkedIn ---------------
+
+
+def _field(field_id, input_type="text", **kw):
+    return FakeElement(attrs={"id": field_id, "type": input_type}, **kw)
+
+
+def test_a_lone_newsletter_input_is_not_a_form(config):
+    newsletter = _field("email", "email", excluded=True)
+    page = FakeFormPage(inputs=[newsletter], labels={"email": FakeElement(text="Email")})
+    result = generic.apply(page, {"email": "s@example.com"}, None, auto_submit=False)
+    assert result == {"status": "needs_help", "reason": "Could not locate an application form on this page."}
+    assert newsletter.value is None
+
+
+def test_two_fields_without_a_file_input_are_not_a_form(config):
+    page = FakeFormPage(inputs=[_field("a", "text"), _field("b", "email")])
+    result = generic.apply(page, {}, None, auto_submit=False)
+    assert result["reason"] == "Could not locate an application form on this page."
+
+
+def test_name_email_and_file_is_a_form(monkeypatch, config, tmp_path):
+    name_el, email_el, file_el = _field("name"), _field("email", "email"), _field("cv", "file")
+    page = FakeFormPage(
+        inputs=[name_el, email_el, file_el],
+        labels={"name": FakeElement(text="Full name"), "email": FakeElement(text="Email"),
+                "cv": FakeElement(text="Resume")},
+    )
+    monkeypatch.setattr(
+        generic, "run_claude",
+        lambda *a, **kw: _mapping_response([{"key": "f0", "value": "Sean"}, {"key": "f1", "value": "s@example.com"}]),
+    )
+    cv = tmp_path / "cv.pdf"
+    cv.write_bytes(b"%PDF")
+    result = generic.apply(page, {"full_name": "Sean"}, str(cv), auto_submit=False)
+    assert result["status"] == "ready_to_submit"
+    assert name_el.value == "Sean" and file_el.files == str(cv)
+
+
+def test_search_box_in_excluded_container_is_skipped(config):
+    search = _field("q", "search", excluded=True)
+    page = FakeFormPage(inputs=[search, _field("a"), _field("b"), _field("c", "email")])
+    fields, elements = generic.harvest_fields(page)
+    assert len(fields) == 3 and search not in elements.values()
+
+
+def test_linkedin_easy_apply_only_listing_is_not_automated(config):
+    easy = FakeElement(text="Easy Apply")
+    page = FakeFormPage(clickable=[easy], url="https://www.linkedin.com/jobs/view/12345")
+    result = generic.apply(page, {}, None, auto_submit=True)
+    assert result["status"] == "needs_help"
+    assert "https://www.linkedin.com/jobs/view/12345" in result["reason"]
+    assert "Easy Apply" in result["reason"]
+    assert easy.clicked is False
+
+
+def test_linkedin_external_apply_link_is_clicked(config):
+    easy = FakeElement(text="Easy Apply")
+    external = FakeElement(text="Apply")
+    page = FakeFormPage(clickable=[easy, external], url="https://www.linkedin.com/jobs/view/12345")
+    generic.apply(page, {}, None, auto_submit=False)
+    assert external.clicked is True and easy.clicked is False
 
 
 # --- AllJobs and LinkedIn login-required escalation -----------------------
@@ -526,7 +595,7 @@ def test_apply_to_job_via_generic_escalates_one_help_item_but_still_screenshots(
     email_el = FakeElement(attrs={"id": "email", "type": "email"})
     eligibility_el = FakeElement(attrs={"id": "eligibility", "type": "text"})
     form_page = FakeFormPage(
-        inputs=[email_el, eligibility_el],
+        inputs=[email_el, eligibility_el, FakeElement(attrs={"id": "fullname", "type": "text"})],
         labels={
             "email": FakeElement(text="Email"),
             "eligibility": FakeElement(text="Are you authorized to work in Israel without sponsorship?*"),
@@ -577,7 +646,7 @@ def test_apply_to_job_via_generic_holds_as_ready_to_submit_and_never_submits(mon
     phone_el = FakeElement(attrs={"id": "phone", "type": "tel"})
     submit_el = FakeElement(text="Submit application")
     form_page = FakeFormPage(
-        inputs=[email_el, phone_el],
+        inputs=[email_el, phone_el, FakeElement(attrs={"id": "fullname", "type": "text"})],
         clickable=[submit_el],
         labels={"email": FakeElement(text="Email"), "phone": FakeElement(text="Phone")},
         url="https://catonetworks.com/careers/jobs/456",

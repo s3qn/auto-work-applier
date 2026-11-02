@@ -55,10 +55,15 @@
   <h2>Status</h2>
   {% set status = application.status %}
   <div id="detail-status">{% include "partials/status_chip.html" %}</div>
-  {% if application.status == "ready_to_submit" %}
+  {% if application.status == "ready_to_submit" and application.submit_pending %}
+  <p>Queued for the PC worker.</p>
+  {% elif application.status == "ready_to_submit" %}
   <div class="status-buttons">
     <form method="post" action="/applications/{{ application.id }}/release">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if application.is_pilot %}
+      <label><input type="checkbox" name="pilot_checked" value="on" required> I checked the screenshots for this pilot application</label>
+      {% endif %}
       <button type="submit">{{ "Release (send email)" if application.channel.startswith("email:") else "Release (submit)" }}</button>
     </form>
     <form method="post" action="/applications/{{ application.id }}/discard">

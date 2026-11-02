@@ -258,6 +258,7 @@ def apply_to_job(job, *, auto_submit: bool, run_id: int | None = None) -> dict:
                     answers_json=json.dumps(content["screening_answers"]),
                     cv_path=str(cv_path) if cv_path else None,
                     apply_url=first_target,
+                    run_id=run_id,
                 )
                 cover_letter_path = proof.save_cover_letter(config, application_id, content["cover_letter"])
                 merged_answers["cover_letter_file"] = str(cover_letter_path)
@@ -376,8 +377,16 @@ def _finalize_page_attempt(conn, config, job_id, application_id, page, attempt: 
     reason = attempt.get("reason")
     if status == "sent":
         proof.capture_confirmation(conn, config, application_id, page)
+    return _record_page_outcome(conn, job_id, application_id, status, reason)
+
+
+def _record_page_outcome(conn, job_id, application_id, status, reason) -> dict:
+    """Write a terminal page-attempt outcome to the application, job and help
+    items. Shared by the server browser chain and the PC worker API."""
+    if status == "sent":
         db.update_application(conn, application_id, status="sent")
         db.update_job_status(conn, job_id, "applied")
+        db.resolve_open_help_items_for_job(conn, job_id, "Sent.")
     elif status == "ready_to_submit":
         db.update_application(conn, application_id, status="ready_to_submit")
         db.update_job_status(conn, job_id, "applying")
@@ -453,6 +462,14 @@ def release_application(application_id: int) -> dict:
                 reason = f"Release failed: {exc}"
                 db.update_application(conn, application_id, status="failed", notes=reason)
                 return {"status": "failed", "reason": reason}
+
+        if (application["channel"] or "").startswith("agent:"):
+            if not db.queue_worker_submit(conn, job["id"], application_id):
+                return {
+                    "status": "refused",
+                    "reason": "A submit for this application is already queued or running on the PC worker.",
+                }
+            return {"status": "queued", "reason": "Queued for the PC worker's next run."}
 
         apply_url = application["apply_url"] or job["url"]
         visible_mode = _visible_mode(conn, config, None)

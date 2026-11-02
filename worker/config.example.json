@@ -1,0 +1,11 @@
+{
+  "server": "https://autojob.sean.build",
+  "token": "paste the token printed by set_worker_token",
+  "user_data_dir": "%LOCALAPPDATA%\\autojob-worker\\browser-profile",
+  "browser": "msedge",
+  "executable_path": null,
+  "mcp_package": "@playwright/mcp@0.0.84",
+  "model": "sonnet",
+  "max_jobs": 20,
+  "max_minutes": 300
+}
