@@ -4,7 +4,7 @@
 <a href="/runs" class="back-link">&larr; Back to run log</a>
 <h1>Run {{ run.id }}<a href="/runs/{{ run.id }}/live" class="live-link">Live &rarr;</a></h1>
 <p class="secondary">
-  {{ run.trigger }} started {{ run.started_at }}{% if run.finished_at %}, finished {{ run.finished_at }}{% endif %}
+  {{ run.trigger }}{% if run.mode == 'refresh' %} (refresh){% endif %} started {{ run.started_at }}{% if run.finished_at %}, finished {{ run.finished_at }}{% endif %}
 </p>
 {% include "partials/run_progress_panel.html" %}
 {% include "partials/run_log_card.html" %}

@@ -2,11 +2,24 @@
 {% block title %}Jobs found - auto-job{% endblock %}
 {% block content %}
 <h1>Jobs found</h1>
+<div class="page-actions">
 <div class="tabs">
   <a class="tab {{ 'active' if status == 'all' else '' }}" href="/jobs">All</a>
   <a class="tab {{ 'active' if status == 'queued' else '' }}" href="/jobs?status=queued">Queued</a>
   <a class="tab {{ 'active' if status == 'filtered_out' else '' }}" href="/jobs?status=filtered_out">Filtered out</a>
 </div>
+<form method="post" action="/runs/refresh">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit">Refresh jobs</button>
+</form>
+</div>
+<p class="field-hint">Scan and filter only. "Run now" in the sidebar also researches and applies.</p>
+{% if refresh_started %}
+<p>Refresh started. New jobs appear here as they are found. <a href="/runs/live">Watch it live</a>.</p>
+{% endif %}
+{% if run_busy %}
+<p>A run is already in progress. Try again once it finishes.</p>
+{% endif %}
 {% if status == 'queued' %}
 <form method="post" action="/jobs/research-pending">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -14,9 +27,6 @@
 </form>
 {% if research_started %}
 <p>Research started in the background.</p>
-{% endif %}
-{% if research_busy %}
-<p>A run is already in progress. Try again once it finishes.</p>
 {% endif %}
 {% endif %}
 <div class="card table-card">
@@ -71,7 +81,7 @@
   </table>
   </div>
   {% else %}
-  <p class="empty-state">No jobs found yet. Run a scan to get started.</p>
+  <p class="empty-state">No jobs found yet. Use Refresh jobs to search now, or wait for the daily run.</p>
   {% endif %}
 </div>
 {% endblock %}

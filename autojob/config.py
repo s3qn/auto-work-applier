@@ -38,6 +38,10 @@ class Config:
     def smtp_path(self) -> Path:
         return self.data_dir / "smtp.json"
 
+    @property
+    def run_lock_path(self) -> Path:
+        return self.data_dir / "run.lock"
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.cv_dir.mkdir(parents=True, exist_ok=True)

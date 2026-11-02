@@ -303,6 +303,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN external_id TEXT")
     if not _column_exists(conn, "companies", "careers_url"):
         conn.execute("ALTER TABLE companies ADD COLUMN careers_url TEXT")
+    if not _column_exists(conn, "runs", "mode"):
+        conn.execute("ALTER TABLE runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'full'")
     if not _column_exists(conn, "runs", "progress"):
         conn.execute("ALTER TABLE runs ADD COLUMN progress TEXT")
     if not _column_exists(conn, "companies", "general_cv_url"):
@@ -765,13 +767,44 @@ def resolve_help_item(conn: sqlite3.Connection, help_item_id: int, resolution: s
 
 # --- runs -------------------------------------------------------------
 
-def create_run(conn: sqlite3.Connection, *, trigger: str) -> int:
+def create_run(conn: sqlite3.Connection, *, trigger: str, mode: str = "full") -> int:
     cur = conn.execute(
-        "INSERT INTO runs (started_at, trigger) VALUES (?, ?)",
-        (now_iso(), trigger),
+        "INSERT INTO runs (started_at, trigger, mode) VALUES (?, ?, ?)",
+        (now_iso(), trigger, mode),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def close_interrupted_runs(conn: sqlite3.Connection, *, closed_by_run_id: int) -> int:
+    """Close run rows that never got a finished_at (the process died). Only
+    call while holding the run lock, so no live run can be hit."""
+    now = now_iso()
+    cur = conn.execute(
+        "UPDATE runs SET finished_at = ?, "
+        "log = COALESCE(log, '') || ? "
+        "WHERE finished_at IS NULL AND id != ?",
+        (
+            now,
+            f"\n[{now}] Interrupted: the process exited before this run finished. "
+            f"Closed by run {closed_by_run_id}.",
+            closed_by_run_id,
+        ),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def requeue_interrupted_applying_jobs(conn: sqlite3.Connection) -> int:
+    """Put jobs left in 'applying' by an interrupted run back in the queue,
+    except those with an application that is legitimately waiting or done."""
+    cur = conn.execute(
+        "UPDATE jobs SET status = 'queued' WHERE status = 'applying' AND id NOT IN ("
+        "SELECT job_id FROM applications "
+        "WHERE status IN ('ready_to_submit', 'sent', 'replied', 'interview'))"
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 def update_run_log(conn: sqlite3.Connection, run_id: int, log: str) -> None:

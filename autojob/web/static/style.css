@@ -346,6 +346,17 @@ tr:hover td {
   margin-bottom: 16px;
 }
 
+.page-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.page-actions .tabs {
+  margin-bottom: 0;
+}
+
 .tab {
   padding: 8px 14px;
   border-radius: 8px;

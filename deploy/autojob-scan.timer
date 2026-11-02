@@ -1,10 +1,10 @@
 [Unit]
-Description=Run auto-job scan twice a day
+Description=auto-job daily run at 08:00 Asia/Jerusalem
 
 [Timer]
-OnCalendar=*-*-* 09:00:00 Asia/Jerusalem
-OnCalendar=*-*-* 16:00:00 Asia/Jerusalem
+OnCalendar=*-*-* 08:00:00 Asia/Jerusalem
 Persistent=true
+Unit=autojob-scan.service
 
 [Install]
 WantedBy=timers.target

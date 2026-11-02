@@ -72,6 +72,7 @@ def test_migrate_schema_adds_columns_to_legacy_db(config):
         assert db._column_exists(conn, "companies", "cv_email_source_url")
         assert db._column_exists(conn, "companies", "channels_researched_at")
         assert db._column_exists(conn, "jobs", "company_site_url")
+        assert db._column_exists(conn, "runs", "mode")
 
         # Running it again must not fail or duplicate anything.
         db.migrate_schema(conn)
@@ -454,5 +455,26 @@ def test_migrate_schema_recovers_rows_stranded_in_applications_old(config):
         assert survivor is not None and survivor["channel"] == "lever"
         assert len(db.list_proofs(conn, app_id)) == 1
         db.create_proof(conn, application_id=app_id, kind="pdf", path="/y.pdf")
+    finally:
+        conn.close()
+
+
+def test_requeue_interrupted_applying_jobs_keeps_ready_to_submit(config):
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        ids = {}
+        for name, app_status in (("a", "needs_help"), ("b", "ready_to_submit")):
+            company_id = db.get_or_create_company(conn, name)
+            job_id = db.create_job(
+                conn, source="linkedin", url=f"https://example.com/{name}", title="Pentester",
+                company_id=company_id, status="applying", dedup_key=db.normalize_dedup_key(name, "Pentester"),
+            )
+            db.create_application(conn, job_id=job_id, channel="other", status=app_status)
+            ids[name] = job_id
+
+        assert db.requeue_interrupted_applying_jobs(conn) == 1
+        assert db.get_job(conn, ids["a"])["status"] == "queued"
+        assert db.get_job(conn, ids["b"])["status"] == "applying"
     finally:
         conn.close()

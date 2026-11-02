@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
@@ -13,6 +12,7 @@ from starlette.templating import Jinja2Templates
 from autojob import auth, db
 from autojob.apply.answers import seed_answer_bank
 from autojob.config import Config
+from autojob.pipeline import schedule
 
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
 
@@ -35,7 +35,6 @@ DEFAULT_TARGETS = {
     "excluded_companies": [],
     "priority_companies": [],
     "daily_cap_per_source": 20,
-    "scan_times": ["09:00", "16:00"],
 }
 
 PROFILE_FIELDS = [
@@ -127,25 +126,7 @@ def get_email_daily_cap(conn: sqlite3.Connection) -> int:
 
 
 def next_scan_display(conn: sqlite3.Connection) -> str:
-    targets = get_targets(conn)
-    scan_times = targets.get("scan_times") or DEFAULT_TARGETS["scan_times"]
-    candidates: list[tuple[int, int]] = []
-    for value in scan_times:
-        try:
-            hh, mm = value.split(":")
-            candidates.append((int(hh), int(mm)))
-        except ValueError:
-            continue
-    if not candidates:
-        return "not scheduled"
-    candidates.sort()
-    now = datetime.now(JERUSALEM)
-    for hh, mm in candidates:
-        candidate_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if candidate_dt > now:
-            return f"{hh:02d}:{mm:02d}"
-    hh, mm = candidates[0]
-    return f"{hh:02d}:{mm:02d}"
+    return schedule.describe_next_run()
 
 
 def active_section(path: str) -> str:

@@ -22,6 +22,7 @@ from autojob.config import load_config
 from autojob.llm import filter as llm_filter
 from autojob.llm.cv import get_cv_text
 from autojob.pipeline import events
+from autojob.pipeline.lock import RunInProgress, hold_run_lock
 from autojob.pipeline.research import research_pending
 from autojob.sources import SourceError, alljobs, jobmaster, linkedin
 from autojob.web.deps import get_auto_submit, get_targets
@@ -31,6 +32,7 @@ LINKEDIN_MAX_PAGES = 2
 LINKEDIN_MAX_DETAIL_FETCHES = 15
 SOURCES = ("linkedin", "alljobs", "jobmaster")
 DEFAULT_DAILY_CAP_PER_SOURCE = 20
+RUN_MODES = ("full", "refresh")
 APPLIED_STATUSES = ("sent", "ready_to_submit")
 
 
@@ -99,9 +101,19 @@ def _dedup_new_jobs(conn, raw_jobs: list[dict]) -> list[dict]:
     return new_jobs
 
 
+def _reap_interrupted(conn, logger, run_id: int) -> None:
+    closed = db.close_interrupted_runs(conn, closed_by_run_id=run_id)
+    if closed:
+        logger.log(f"Closed {closed} interrupted run(s).")
+    requeued = db.requeue_interrupted_applying_jobs(conn)
+    if requeued:
+        logger.log(f"Requeued {requeued} job(s) left in 'applying' by an interrupted run.")
+
+
 def run_scan(
     trigger: str = "manual",
     *,
+    mode: str = "full",
     keywords: list[str] | None = None,
     max_research: int = MAX_RESEARCH_PER_RUN,
     linkedin_max_pages: int = LINKEDIN_MAX_PAGES,
@@ -112,13 +124,28 @@ def run_scan(
     `keywords` overrides the titles/keywords from the Targets page, mainly
     for a smaller, faster manual run. Everything else always reads from the
     real settings and database.
+
+    `mode="refresh"` runs scan and filter only; research and apply are
+    skipped. Raises RunInProgress if another run holds the run lock.
     """
+    if mode not in RUN_MODES:
+        raise ValueError(f"Unknown run mode: {mode!r}")
     config = load_config()
+    with hold_run_lock(config):
+        return _run_scan_locked(
+            config, trigger, mode, keywords, max_research, linkedin_max_pages, linkedin_max_detail_fetches
+        )
+
+
+def _run_scan_locked(
+    config, trigger, mode, keywords, max_research, linkedin_max_pages, linkedin_max_detail_fetches
+) -> int:
     db.init_db(config)
     conn = db.get_connection(config)
     try:
-        run_id = db.create_run(conn, trigger=trigger)
+        run_id = db.create_run(conn, trigger=trigger, mode=mode)
         logger = RunLogger(conn, run_id)
+        _reap_interrupted(conn, logger, run_id)
         events.emit(conn, run_id, "system", "info", f"Run started ({trigger}).")
         found = 0
         filtered = 0
@@ -248,21 +275,25 @@ def run_scan(
                 logger.log("Nothing new to filter.")
                 events.emit(conn, run_id, "system", "info", "Nothing new to filter.")
 
-            # Every scan, not only one that found something: companies
-            # already in the database still need their apply channels
-            # looked up, and a failed lookup gets retried here.
-            _, research_failed = research_pending(
-                conn, work_dir=config.data_dir / "llm-work", limit=max_research, run_id=run_id, logger=logger
-            )
-            failed += research_failed
+            if mode == "full":
+                # Every scan, not only one that found something: companies
+                # already in the database still need their apply channels
+                # looked up, and a failed lookup gets retried here.
+                _, research_failed = research_pending(
+                    conn, work_dir=config.data_dir / "llm-work", limit=max_research, run_id=run_id, logger=logger
+                )
+                failed += research_failed
 
-            auto_submit = get_auto_submit(conn)
-            daily_cap = targets.get("daily_cap_per_source") or DEFAULT_DAILY_CAP_PER_SOURCE
-            apply_applied, apply_failed = _run_apply_phase(
-                conn, logger, daily_cap=daily_cap, auto_submit=auto_submit, run_id=run_id
-            )
-            applied += apply_applied
-            failed += apply_failed
+                auto_submit = get_auto_submit(conn)
+                daily_cap = targets.get("daily_cap_per_source") or DEFAULT_DAILY_CAP_PER_SOURCE
+                apply_applied, apply_failed = _run_apply_phase(
+                    conn, logger, daily_cap=daily_cap, auto_submit=auto_submit, run_id=run_id
+                )
+                applied += apply_applied
+                failed += apply_failed
+            else:
+                logger.log("Refresh: research and apply skipped.")
+                events.emit(conn, run_id, "system", "info", "Refresh: research and apply skipped.")
         except Exception as exc:  # noqa: BLE001 - the run must always finish and record something
             logger.log(f"Run failed unexpectedly: {exc}")
             events.emit(conn, run_id, "system", "error", f"Run failed unexpectedly: {exc}")
@@ -333,5 +364,15 @@ def _run_apply_phase(
     return applied, failed
 
 
+def main(argv=None) -> int:
+    try:
+        run_id = run_scan(trigger="scheduled")
+    except RunInProgress:
+        print("Another run is in progress; skipping this scheduled run.")
+        return 0
+    print(f"Run {run_id} finished.")
+    return 0
+
+
 if __name__ == "__main__":
-    run_scan(trigger="scheduled")
+    raise SystemExit(main())

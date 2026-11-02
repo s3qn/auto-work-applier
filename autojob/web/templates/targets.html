@@ -24,8 +24,7 @@
     <label for="daily_cap_per_source">Daily cap per source</label>
     <input type="number" id="daily_cap_per_source" name="daily_cap_per_source" min="1" value="{{ targets.daily_cap_per_source }}">
 
-    <label for="scan_times">Scan times, 24 hour HH:MM (one per line)</label>
-    <textarea id="scan_times" name="scan_times" rows="2">{{ targets.scan_times | join('\n') }}</textarea>
+    <p class="field-hint">Daily run: every day at 08:00 Asia/Jerusalem (scan, filter, research, apply), next {{ next_scan }}. Installed with deploy/install-timer.sh.</p>
 
     <label class="checkbox-label" for="auto_submit">
       <input type="checkbox" id="auto_submit" name="auto_submit" value="true" {{ 'checked' if auto_submit else '' }}>

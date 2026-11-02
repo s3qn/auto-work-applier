@@ -3,12 +3,15 @@ browser: every source, every LLM call, and the apply phase are all fakes."""
 
 from __future__ import annotations
 
+import fcntl
+
 import pytest
 
 from autojob import db
 from autojob.llm import filter as llm_filter
 from autojob.llm import research as llm_research
 from autojob.pipeline import run as run_module
+from autojob.pipeline.lock import RunInProgress
 from autojob.sources import SourceError, alljobs, jobmaster, linkedin
 
 
@@ -562,3 +565,111 @@ def test_research_runs_every_scan_even_with_nothing_new(config, monkeypatch):
         conn.close()
     assert researched == ["Beta"]
     assert company["channels_researched_at"] is not None
+
+
+def _hold_lock(config):
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    handle = open(config.run_lock_path, "a")
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return handle
+
+
+def test_refresh_mode_skips_research_and_apply(config, monkeypatch):
+    _seed_queued_job(config)
+    research_calls, apply_calls = [], []
+    monkeypatch.setattr(
+        run_module, "research_pending", lambda *a, **kw: research_calls.append(1) or (0, 0)
+    )
+    _patch_no_op_apply(monkeypatch, calls=apply_calls)
+
+    run_id = run_module.run_scan(trigger="manual", mode="refresh", keywords=[])
+
+    assert research_calls == [] and apply_calls == []
+    conn = db.get_connection(config)
+    try:
+        run = db.get_run(conn, run_id)
+        assert run["mode"] == "refresh"
+        assert "Refresh: research and apply skipped." in run["log"]
+    finally:
+        conn.close()
+
+
+def test_run_scan_rejects_unknown_mode(config):
+    with pytest.raises(ValueError):
+        run_module.run_scan(mode="bogus", keywords=[])
+
+
+def test_run_scan_raises_when_lock_held(config):
+    handle = _hold_lock(config)
+    try:
+        with pytest.raises(RunInProgress):
+            run_module.run_scan(keywords=[])
+    finally:
+        handle.close()
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        assert db.list_runs(conn) == []
+    finally:
+        conn.close()
+
+
+def test_run_scan_closes_interrupted_runs_and_requeues_applying_jobs(config, monkeypatch):
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        old_run = db.create_run(conn, trigger="manual")
+        job_ids = {}
+        for name, app_status in (("a", "needs_help"), ("b", "ready_to_submit")):
+            company_id = db.get_or_create_company(conn, name)
+            job_id = db.create_job(
+                conn, source="linkedin", url=f"https://example.com/{name}", title="Pentester",
+                company_id=company_id, status="applying", dedup_key=db.normalize_dedup_key(name, "Pentester"),
+            )
+            db.create_application(conn, job_id=job_id, channel="other", status=app_status)
+            job_ids[name] = job_id
+    finally:
+        conn.close()
+    _patch_no_op_apply(monkeypatch)
+
+    run_module.run_scan(keywords=[])
+
+    conn = db.get_connection(config)
+    try:
+        old = db.get_run(conn, old_run)
+        assert old["finished_at"] is not None
+        assert "Interrupted:" in old["log"]
+        assert db.get_job(conn, job_ids["a"])["status"] == "queued"
+        assert db.get_job(conn, job_ids["b"])["status"] == "applying"
+    finally:
+        conn.close()
+
+
+def test_scheduled_run_never_enables_auto_submit(config, monkeypatch):
+    _patch_sources(monkeypatch)
+    _seed_queued_job(config)
+    calls = []
+    _patch_no_op_apply(monkeypatch, calls=calls)
+
+    assert run_module.main() == 0
+
+    assert calls[0][1] is False
+    conn = db.get_connection(config)
+    try:
+        assert db.get_setting(conn, "auto_submit") is None
+    finally:
+        conn.close()
+
+
+def test_main_skips_when_lock_held(config):
+    handle = _hold_lock(config)
+    try:
+        assert run_module.main() == 0
+    finally:
+        handle.close()
+    db.init_db(config)
+    conn = db.get_connection(config)
+    try:
+        assert db.list_runs(conn) == []
+    finally:
+        conn.close()

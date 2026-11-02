@@ -17,6 +17,7 @@ from autojob import auth, db
 from autojob.apply import mailer
 from autojob.config import Config
 from autojob.pipeline import events
+from autojob.pipeline import lock as runlock
 from autojob.pipeline import run as run_module
 from autojob.pipeline.research import research_pending
 from autojob.web.deps import (
@@ -204,8 +205,13 @@ def application_proof_file(application_id: int, proof_id: int, conn=Depends(get_
 def _release_application_and_release_lock(application_id: int, lock: threading.Lock) -> None:
     from autojob.apply.apply import release_application
 
+    from autojob.config import load_config
+
     try:
-        release_application(application_id)
+        with runlock.hold_run_lock(load_config()):
+            release_application(application_id)
+    except runlock.RunInProgress:
+        pass
     finally:
         lock.release()
 
@@ -216,6 +222,7 @@ def application_release(
     request: Request,
     csrf_token: str = Form(...),
     conn=Depends(get_db),
+    config: Config = Depends(get_config),
 ):
     verify_csrf_or_403(request, csrf_token)
     application = db.get_application(conn, application_id)
@@ -224,7 +231,7 @@ def application_release(
     if application["status"] != "ready_to_submit":
         raise HTTPException(status_code=400, detail="Only a ready-to-submit application can be released.")
     lock: threading.Lock = request.app.state.run_lock
-    if not lock.acquire(blocking=False):
+    if runlock.run_active(config) or not lock.acquire(blocking=False):
         return RedirectResponse(f"/applications/{application_id}?busy=1", status_code=303)
     thread = threading.Thread(
         target=_release_application_and_release_lock, args=(application_id, lock), daemon=True
@@ -262,6 +269,7 @@ def jobs_list(
     status: str = "all",
     research: str | None = None,
     busy: str | None = None,
+    refresh: str | None = None,
     conn=Depends(get_db),
     templates: Jinja2Templates = Depends(get_templates),
 ):
@@ -271,6 +279,8 @@ def jobs_list(
     ctx["status"] = status if status in JOB_STATUS_TABS else "all"
     ctx["research_started"] = research == "started"
     ctx["research_busy"] = busy == "1"
+    ctx["refresh_started"] = refresh == "started"
+    ctx["run_busy"] = busy == "1"
     return templates.TemplateResponse(request, "jobs.html", ctx)
 
 
@@ -281,17 +291,24 @@ def _research_pending_and_release(lock: threading.Lock) -> None:
     conn = db.get_connection(config)
     try:
         work_dir = config.data_dir / "llm-work"
-        research_pending(conn, work_dir=work_dir, limit=run_module.MAX_RESEARCH_PER_RUN)
+        with runlock.hold_run_lock(config):
+            research_pending(conn, work_dir=work_dir, limit=run_module.MAX_RESEARCH_PER_RUN)
+    except runlock.RunInProgress:
+        pass
     finally:
         conn.close()
         lock.release()
 
 
 @router.post("/jobs/research-pending")
-def jobs_research_pending(request: Request, csrf_token: str = Form(...), conn=Depends(get_db)):
+def jobs_research_pending(
+    request: Request,
+    csrf_token: str = Form(...),
+    config: Config = Depends(get_config),
+):
     verify_csrf_or_403(request, csrf_token)
     lock: threading.Lock = request.app.state.run_lock
-    if db.run_in_progress(conn) or not lock.acquire(blocking=False):
+    if runlock.run_active(config) or not lock.acquire(blocking=False):
         return RedirectResponse("/jobs?status=queued&busy=1", status_code=303)
     thread = threading.Thread(target=_research_pending_and_release, args=(lock,), daemon=True)
     thread.start()
@@ -329,9 +346,11 @@ def job_detail(
 
 def _apply_job_in_background(job, auto_submit: bool) -> None:
     from autojob.apply.apply import apply_to_job
+    from autojob.config import load_config
 
     try:
-        apply_to_job(job, auto_submit=auto_submit)
+        with runlock.hold_run_lock(load_config()):
+            apply_to_job(job, auto_submit=auto_submit)
     except Exception:  # noqa: BLE001 - apply_to_job already handles its own failures; last-resort net
         pass
 
@@ -342,11 +361,14 @@ def job_apply_now(
     request: Request,
     csrf_token: str = Form(...),
     conn=Depends(get_db),
+    config: Config = Depends(get_config),
 ):
     verify_csrf_or_403(request, csrf_token)
     job = db.get_job_with_company(conn, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
+    if runlock.run_active(config):
+        return RedirectResponse(f"/jobs/{job_id}?busy=1", status_code=303)
     auto_submit = get_auto_submit(conn)
     thread = threading.Thread(target=_apply_job_in_background, args=(job, auto_submit), daemon=True)
     thread.start()
@@ -475,7 +497,6 @@ def targets_post(
     excluded_companies: str = Form(""),
     priority_companies: str = Form(""),
     daily_cap_per_source: int = Form(20),
-    scan_times: str = Form(""),
     auto_submit: bool = Form(False),
     email_daily_cap: int = Form(15),
     csrf_token: str = Form(...),
@@ -495,7 +516,6 @@ def targets_post(
         "excluded_companies": lines(excluded_companies),
         "priority_companies": lines(priority_companies),
         "daily_cap_per_source": daily_cap_per_source,
-        "scan_times": lines(scan_times),
     }
     db.set_setting(conn, "targets", new_targets)
     db.set_setting(conn, "auto_submit", auto_submit)
@@ -707,22 +727,35 @@ def run_events_json(
     }
 
 
-def _run_scan_and_release(lock: threading.Lock) -> None:
+def _run_scan_and_release(lock: threading.Lock, mode: str = "full") -> None:
     try:
-        run_module.run_scan(trigger="manual")
+        run_module.run_scan(trigger="manual", mode=mode)
+    except runlock.RunInProgress:
+        pass
     finally:
         lock.release()
 
 
 @router.post("/runs/now")
-def run_now(request: Request, csrf_token: str = Form(...), conn=Depends(get_db)):
+def run_now(request: Request, csrf_token: str = Form(...), config: Config = Depends(get_config)):
     verify_csrf_or_403(request, csrf_token)
     lock: threading.Lock = request.app.state.run_lock
-    if db.run_in_progress(conn) or not lock.acquire(blocking=False):
+    if runlock.run_active(config) or not lock.acquire(blocking=False):
         return RedirectResponse("/runs?busy=1", status_code=303)
     thread = threading.Thread(target=_run_scan_and_release, args=(lock,), daemon=True)
     thread.start()
     return RedirectResponse("/runs", status_code=303)
+
+
+@router.post("/runs/refresh")
+def run_refresh(request: Request, csrf_token: str = Form(...), config: Config = Depends(get_config)):
+    verify_csrf_or_403(request, csrf_token)
+    lock: threading.Lock = request.app.state.run_lock
+    if runlock.run_active(config) or not lock.acquire(blocking=False):
+        return RedirectResponse("/jobs?busy=1", status_code=303)
+    thread = threading.Thread(target=_run_scan_and_release, args=(lock, "refresh"), daemon=True)
+    thread.start()
+    return RedirectResponse("/jobs?refresh=started", status_code=303)
 
 
 # --- profile and CV -------------------------------------------------------

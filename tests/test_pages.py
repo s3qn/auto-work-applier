@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import time
 
 from tests.conftest import get_csrf_token, login
@@ -190,7 +191,6 @@ def test_targets_save_and_reload(client, with_password):
             "excluded_companies": "BadCo",
             "priority_companies": "GoodCo",
             "daily_cap_per_source": "10",
-            "scan_times": "08:00\n17:30",
             "csrf_token": token,
         },
         follow_redirects=False,
@@ -202,7 +202,7 @@ def test_targets_save_and_reload(client, with_password):
     assert "Pentester" in reload_response.text
     assert "Red Team" in reload_response.text
     assert "BadCo" in reload_response.text
-    assert "08:00" in reload_response.text
+    assert "08:00 Asia/Jerusalem" in reload_response.text
 
 
 def test_cv_upload_rejects_other_file_types(client, with_password):
@@ -261,6 +261,75 @@ def test_run_now_records_a_run(client, with_password, config, monkeypatch):
     assert runs[0]["finished_at"] is not None
 
 
+def test_refresh_records_a_refresh_run(client, with_password, config, monkeypatch):
+    from autojob import db
+    from autojob.pipeline import run as run_module
+    from autojob.sources import alljobs, jobmaster, linkedin
+
+    monkeypatch.setattr(linkedin, "search", lambda keyword, **kw: [])
+    monkeypatch.setattr(alljobs, "search", lambda keyword: [])
+    monkeypatch.setattr(jobmaster, "search", lambda keyword: [])
+
+    def fail(*a, **kw):
+        raise AssertionError("research and apply must not run on a refresh")
+
+    monkeypatch.setattr(run_module, "research_pending", fail)
+    monkeypatch.setattr(run_module, "apply_to_job", fail)
+
+    login(client, with_password)
+    token = get_csrf_token(client, "/jobs")
+    response = client.post("/runs/refresh", data={"csrf_token": token}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/jobs?refresh=started"
+
+    conn = db.get_connection(config)
+    try:
+        runs = []
+        for _ in range(40):
+            runs = db.list_runs(conn)
+            if runs and runs[0]["finished_at"]:
+                break
+            time.sleep(0.05)
+    finally:
+        conn.close()
+    assert runs and runs[0]["mode"] == "refresh"
+
+
+def test_refresh_redirects_busy_when_lock_held(client, with_password, config):
+    import fcntl
+
+    from autojob import db
+
+    login(client, with_password)
+    token = get_csrf_token(client, "/jobs")
+    handle = open(config.run_lock_path, "a")
+    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        response = client.post("/runs/refresh", data={"csrf_token": token}, follow_redirects=False)
+    finally:
+        handle.close()
+    assert response.status_code == 303
+    assert response.headers["location"] == "/jobs?busy=1"
+    conn = db.get_connection(config)
+    try:
+        assert db.list_runs(conn) == []
+    finally:
+        conn.close()
+
+
+def test_jobs_page_shows_refresh_button_and_flash(client, with_password):
+    login(client, with_password)
+    response = client.get("/jobs?refresh=started")
+    assert "Refresh jobs" in response.text
+    assert "Watch it live" in response.text
+
+
+def test_sidebar_shows_computed_next_scan(client, with_password):
+    login(client, with_password)
+    response = client.get("/jobs")
+    assert re.search(r"Next scan (today|tomorrow) at 08:00", response.text)
+
+
 # --- job detail and apply now --------------------------------------------
 
 def test_job_detail_page_renders(client, with_password, config):
@@ -316,6 +385,33 @@ def test_job_apply_now_runs_apply_to_job_in_background(client, with_password, co
     assert calls == [(job_id, False)]  # auto_submit defaults to off
 
 
+def test_job_apply_now_is_busy_while_a_run_holds_the_lock(client, with_password, config, monkeypatch):
+    login(client, with_password)
+    from autojob import db
+    from autojob.pipeline import lock as runlock
+
+    conn = db.get_connection(config)
+    try:
+        company_id = db.get_or_create_company(conn, "Acme")
+        job_id = db.create_job(
+            conn, source="linkedin", url="https://example.com/job2", title="Junior Pentester",
+            company_id=company_id, status="queued",
+        )
+    finally:
+        conn.close()
+
+    calls = []
+    monkeypatch.setattr("autojob.apply.apply.apply_to_job", lambda job, *, auto_submit: calls.append(job["id"]))
+
+    token = get_csrf_token(client, f"/jobs/{job_id}")
+    with runlock.hold_run_lock(config):
+        response = client.post(f"/jobs/{job_id}/apply", data={"csrf_token": token}, follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/jobs/{job_id}?busy=1"
+    time.sleep(0.2)
+    assert calls == []
+
+
 # --- targets: auto_submit toggle ------------------------------------------
 
 def test_targets_page_shows_auto_submit_explanation_and_defaults_off(client, with_password):
@@ -335,7 +431,7 @@ def test_targets_save_enables_auto_submit(client, with_password, config):
         data={
             "titles": "Pentester", "locations": "Israel", "max_years": "3",
             "excluded_companies": "", "priority_companies": "", "daily_cap_per_source": "10",
-            "scan_times": "", "auto_submit": "true", "csrf_token": token,
+            "auto_submit": "true", "csrf_token": token,
         },
         follow_redirects=False,
     )
@@ -513,7 +609,7 @@ def test_targets_save_email_daily_cap(client, with_password, config):
         data={
             "titles": "Pentester", "locations": "Israel", "max_years": "3",
             "excluded_companies": "", "priority_companies": "", "daily_cap_per_source": "10",
-            "scan_times": "", "email_daily_cap": "3", "csrf_token": token,
+            "email_daily_cap": "3", "csrf_token": token,
         },
         follow_redirects=False,
     )

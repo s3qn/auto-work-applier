@@ -4,4 +4,6 @@ Description=auto-job scan run
 [Service]
 Type=oneshot
 WorkingDirectory=%h/ai-projects/auto-job
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+TimeoutStartSec=4h
 ExecStart=%h/.local/bin/uv run python -m autojob.pipeline.run

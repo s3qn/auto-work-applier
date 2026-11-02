@@ -13,7 +13,7 @@
       {% for run in runs %}
       <tr>
         <td><a href="/runs/{{ run.id }}">{{ run.started_at }}</a></td>
-        <td>{{ run.trigger }}</td>
+        <td>{{ run.trigger }}{% if run.mode == 'refresh' %} (refresh){% endif %}</td>
         <td>{{ run.found }}</td>
         <td>{{ run.filtered }}</td>
         <td>{{ run.applied }}</td>

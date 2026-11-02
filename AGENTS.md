@@ -284,6 +284,27 @@ bars (`partials/run_progress_panel.html`) update the same way the run log
 already did: htmx polling `/runs/{id}/progress` every 2s, reading
 `runs.progress`, no SSE needed there.
 
+## Schedule and Refresh
+
+`deploy/autojob-scan.timer` fires `deploy/autojob-scan.service` every day at
+08:00 Asia/Jerusalem (`python -m autojob.pipeline.run`, trigger `scheduled`).
+`deploy/install-timer.sh` copies both units to `~/.config/systemd/user` and
+enables the timer; it is not run automatically. `pipeline/schedule.py` holds
+`DAILY_RUN_TIME`, and a test ties it to the timer file. The sidebar's "Next
+scan" is computed from it (`describe_next_run`); there is no Targets field.
+
+`data/run.lock` (`pipeline/lock.py`, `flock`) is the one guard shared by the
+timer and the dashboard. `run_scan` holds it for the whole run and raises
+`RunInProgress` otherwise; the kernel frees it if a process dies. Run, Refresh,
+Release and Research buttons check `run_active(config)`. A scheduled run that
+finds the lock held exits 0.
+
+`run_scan(mode=)` is `full` (scan, filter, research, apply) or `refresh` (scan
+and filter only, the Jobs page "Refresh jobs" button, stored in `runs.mode`).
+At the start of every run, unfinished run rows are closed as interrupted, and
+jobs stuck in `applying` with no `ready_to_submit`/`sent`/`replied`/`interview`
+application go back to `queued`. Scheduling never changes `auto_submit`.
+
 # Writing style
 
 Applies to everything a human reads: UI copy, code comments, JSDoc, docs and
