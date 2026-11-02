@@ -94,6 +94,8 @@ def _build_prompt(profile_answers: dict, answer_bank: dict, job: dict, company_t
         f"Company: {job.get('company', '')}\n"
         f"Company summary: {company_tldr or 'unknown'}\n"
         f"Job description:\n{description or '(no description available)'}\n\n"
+        "Never use the word junior or its Hebrew equivalent. Mention missing professional "
+        "experience in at most one short honest sentence, and not in the opening line.\n\n"
         "Respond with ONLY a JSON object: "
         '{"cover_letter": "3 to 5 short paragraphs, plain text, no markdown, honest and '
         'specific to this company and role, mentions the certifications and hands-on labs, '

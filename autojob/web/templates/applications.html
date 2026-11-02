@@ -13,7 +13,7 @@
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Company</th><th>Role</th><th>Sent via</th><th>When</th><th>Status</th><th>Proof</th><th></th></tr>
+      <tr><th>Company</th><th>Role</th><th>Sent via</th><th>CV</th><th>When</th><th>Status</th><th>Proof</th><th></th></tr>
     </thead>
     <tbody>
       {% for a in applications %}
@@ -31,7 +31,8 @@
           {% else %}{{ a.company_name or "Unknown" }}{% endif %}
         </td>
         <td><a class="row-link" href="/applications/{{ a.id }}">{{ a.job_title }}</a></td>
-        <td>{{ a.channel }}</td>
+        <td>{% if a.channel.startswith('pc:') %}<span class="chip chip-sent">PC</span> {{ a.channel[3:] }}{% else %}{{ a.channel }}{% endif %}</td>
+        <td>{{ a.cv_version or "-" }}</td>
         <td>{{ a.applied_at }}</td>
         <td><span class="chip chip-{{ a.status }}">{{ a.status.replace('_', ' ') }}</span></td>
         <td>
@@ -60,7 +61,7 @@
       </tr>
       {% if a.company_id %}
       <tr class="tldr-row" id="tldr-row-{{ a.id }}">
-        <td colspan="7"><div id="tldr-{{ a.id }}" class="company-tldr">Loading&hellip;</div></td>
+        <td colspan="8"><div id="tldr-{{ a.id }}" class="company-tldr">Loading&hellip;</div></td>
       </tr>
       {% endif %}
       {% endfor %}

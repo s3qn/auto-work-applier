@@ -14,6 +14,8 @@
   <h2>Job</h2>
   <p><a href="{{ application.job_url }}" target="_blank" rel="noopener">{{ application.job_url }}</a></p>
   <p class="secondary">Applied via {{ application.channel }} on {{ application.applied_at }}</p>
+  {% if application.cv_version %}<p class="secondary">CV version: {{ application.cv_version }}</p>{% endif %}
+  {% if application.notes %}<p class="secondary" style="white-space: pre-wrap;">{{ application.notes }}</p>{% endif %}
 </div>
 
 {% if application.cover_letter %}

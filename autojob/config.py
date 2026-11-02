@@ -43,6 +43,10 @@ class Config:
         return self.data_dir / "worker_token.json"
 
     @property
+    def apply_token_path(self) -> Path:
+        return self.data_dir / "apply_token.json"
+
+    @property
     def run_lock_path(self) -> Path:
         return self.data_dir / "run.lock"
 

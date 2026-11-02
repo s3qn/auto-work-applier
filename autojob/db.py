@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS applications (
             OR channel LIKE 'generic:%'
             OR channel LIKE 'email:%'
             OR channel LIKE 'agent:%'
+            OR channel LIKE 'pc:%'
         ),
     applied_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'sent'
@@ -62,7 +63,8 @@ CREATE TABLE IF NOT EXISTS applications (
     email_to TEXT,
     email_draft TEXT,
     run_id INTEGER,
-    pilot_verdict TEXT
+    pilot_verdict TEXT,
+    cv_version TEXT
 );
 
 CREATE TABLE IF NOT EXISTS proofs (
@@ -109,6 +111,24 @@ CREATE TABLE IF NOT EXISTS run_events (
     kind TEXT NOT NULL CHECK (kind IN ('info', 'score', 'progress', 'error')),
     message TEXT NOT NULL,
     detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS apply_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_pulled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS apply_batch_items (
+    batch_id INTEGER NOT NULL REFERENCES apply_batches(id),
+    job_id INTEGER NOT NULL REFERENCES jobs(id),
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'open'
+        CHECK (state IN ('open', 'submitted', 'blocked', 'failed', 'expired')),
+    reason TEXT,
+    result_at TEXT,
+    PRIMARY KEY (batch_id, job_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -167,7 +187,7 @@ def _table_sql(conn: sqlite3.Connection, table: str) -> str:
 _APPLICATIONS_COLUMNS = (
     "id", "job_id", "channel", "applied_at", "status", "notes",
     "cover_letter", "answers_json", "cv_path", "apply_url", "email_to", "email_draft",
-    "run_id", "pilot_verdict",
+    "run_id", "pilot_verdict", "cv_version",
 )
 _PROOFS_COLUMNS = ("id", "application_id", "kind", "path", "created_at")
 
@@ -251,7 +271,10 @@ def _heal_applications_old_references(conn: sqlite3.Connection) -> None:
 
 def _applications_is_current(conn: sqlite3.Connection) -> bool:
     sql = _table_sql(conn, "applications")
-    return "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql and "email:" in sql and "agent:" in sql
+    return (
+        "ready_to_submit" in sql and "'lever'" in sql and "generic:" in sql and "email:" in sql and "agent:" in sql
+        and "pc:" in sql and "cv_version" in sql
+    )
 
 
 def _rebuild_tables(conn: sqlite3.Connection) -> None:
@@ -325,6 +348,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE applications ADD COLUMN run_id INTEGER")
     if not _column_exists(conn, "applications", "pilot_verdict"):
         conn.execute("ALTER TABLE applications ADD COLUMN pilot_verdict TEXT")
+    if not _column_exists(conn, "applications", "cv_version"):
+        conn.execute("ALTER TABLE applications ADD COLUMN cv_version TEXT")
+    if not _column_exists(conn, "jobs", "pc_attempts"):
+        conn.execute("ALTER TABLE jobs ADD COLUMN pc_attempts INTEGER NOT NULL DEFAULT 0")
     for column in ("worker_phase TEXT", "worker_lease_until TEXT", "worker_lease_token TEXT",
                    "worker_application_id INTEGER"):
         if not _column_exists(conn, "jobs", column.split()[0]):
@@ -1121,3 +1148,106 @@ def get_dashboard_stats(conn: sqlite3.Connection) -> dict:
         "replies_7d": replies_7d,
         "interviews": interviews,
     }
+
+
+# --- daily apply queue (PC pull) ----------------------------------------
+
+BATCH_DONE_STATUSES = ("sent", "replied", "interview", "rejected")
+
+
+def jerusalem_day(moment: datetime | None = None) -> str:
+    from zoneinfo import ZoneInfo
+
+    moment = moment or datetime.now(timezone.utc)
+    return moment.astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d")
+
+
+def open_batch_job_ids(conn: sqlite3.Connection) -> set[int]:
+    """Jobs still open in today's batch only: a stale batch never holds jobs back."""
+    rows = conn.execute(
+        "SELECT apply_batch_items.job_id FROM apply_batch_items "
+        "JOIN apply_batches ON apply_batches.id = apply_batch_items.batch_id "
+        "WHERE apply_batch_items.state = 'open' AND apply_batches.day = ?",
+        (jerusalem_day(),),
+    ).fetchall()
+    return {row["job_id"] for row in rows}
+
+
+def select_apply_batch_jobs(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    """Queued jobs the PC apply session may take, best fit first."""
+    now = now_iso()
+    rows = conn.execute(
+        "SELECT jobs.*, companies.name AS company_name FROM jobs "
+        "LEFT JOIN companies ON companies.id = jobs.company_id "
+        "WHERE jobs.status = 'queued' "
+        "AND NOT (jobs.worker_lease_token IS NOT NULL AND jobs.worker_lease_until >= ?) "
+        "AND COALESCE(jobs.worker_phase, '') != 'submit' "
+        "AND jobs.id NOT IN (SELECT i.job_id FROM apply_batch_items i "
+        "JOIN apply_batches b ON b.id = i.batch_id WHERE i.state = 'open' AND b.day = ?) "
+        f"AND jobs.id NOT IN (SELECT job_id FROM applications WHERE status IN "
+        f"({', '.join('?' for _ in BATCH_DONE_STATUSES)})) "
+        "AND LOWER(COALESCE(jobs.reason, '')) NOT LIKE 'vip%' "
+        "AND jobs.url NOT LIKE '%/User/Register/CreditCard.aspx%' "
+        "AND jobs.url NOT LIKE '%/Register/%' "
+        "ORDER BY jobs.fit_score DESC, jobs.found_at DESC, jobs.id DESC LIMIT ?",
+        (now, jerusalem_day(), *BATCH_DONE_STATUSES, limit),
+    ).fetchall()
+    return rows
+
+
+def expire_open_batch_items_before(conn: sqlite3.Connection, day: str) -> int:
+    cur = conn.execute(
+        "UPDATE apply_batch_items SET state = 'expired', result_at = ? WHERE state = 'open' "
+        "AND batch_id IN (SELECT id FROM apply_batches WHERE day < ?)",
+        (now_iso(), day),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def get_batch_for_day(conn: sqlite3.Connection, day: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM apply_batches WHERE day = ? ORDER BY id LIMIT 1", (day,)).fetchone()
+
+
+def create_batch(conn: sqlite3.Connection, day: str, items: list[tuple[int, str]]) -> int:
+    """Store a batch with its frozen payloads: `items` is (job_id, payload_json)."""
+    cur = conn.execute("INSERT INTO apply_batches (day, created_at) VALUES (?, ?)", (day, now_iso()))
+    batch_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO apply_batch_items (batch_id, job_id, payload_json) VALUES (?, ?, ?)",
+        [(batch_id, job_id, payload) for job_id, payload in items],
+    )
+    conn.commit()
+    return batch_id
+
+
+def touch_batch_pull(conn: sqlite3.Connection, batch_id: int) -> None:
+    conn.execute("UPDATE apply_batches SET last_pulled_at = ? WHERE id = ?", (now_iso(), batch_id))
+    conn.commit()
+
+
+def list_batch_items(conn: sqlite3.Connection, batch_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT apply_batch_items.*, jobs.title AS title, jobs.fit_score AS fit_score, "
+        "companies.name AS company FROM apply_batch_items "
+        "JOIN jobs ON jobs.id = apply_batch_items.job_id "
+        "LEFT JOIN companies ON companies.id = jobs.company_id "
+        "WHERE batch_id = ? ORDER BY apply_batch_items.rowid",
+        (batch_id,),
+    ).fetchall()
+
+
+def latest_batch_item(conn: sqlite3.Connection, job_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM apply_batch_items WHERE job_id = ? ORDER BY batch_id DESC LIMIT 1", (job_id,)
+    ).fetchone()
+
+
+def record_batch_result(
+    conn: sqlite3.Connection, batch_id: int, job_id: int, state: str, reason: str | None
+) -> None:
+    conn.execute(
+        "UPDATE apply_batch_items SET state = ?, reason = ?, result_at = ? WHERE batch_id = ? AND job_id = ?",
+        (state, reason, now_iso(), batch_id, job_id),
+    )
+    conn.commit()

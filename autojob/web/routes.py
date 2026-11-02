@@ -568,6 +568,32 @@ def _worker_line(config: Config, conn) -> str | None:
     return "PC worker last seen: " + moment.astimezone(JERUSALEM).strftime("%Y-%m-%d %H:%M")
 
 
+def _apply_queue_view(config: Config, conn) -> dict:
+    """Data for the apply queue card on the run log."""
+    import json as _json
+    from autojob import apply_token
+
+    last = db.get_setting(conn, "apply_queue_last_pull")
+    last_pull = "never"
+    if last:
+        try:
+            moment = datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            last_pull = moment.astimezone(JERUSALEM).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            pass
+    day = db.jerusalem_day()
+    batch = db.get_batch_for_day(conn, day)
+    items, counts = [], {}
+    if batch is not None:
+        for row in db.list_batch_items(conn, batch["id"]):
+            payload = _json.loads(row["payload_json"])
+            counts[row["state"]] = counts.get(row["state"], 0) + 1
+            items.append({"title": row["title"], "company": row["company"], "site": payload.get("site", ""),
+                          "state": row["state"], "reason": row["reason"]})
+    return {"token_set": apply_token.apply_configured(config), "last_pull": last_pull,
+            "day": day, "rows": items, "counts": counts}
+
+
 @router.get("/runs")
 def runs_list(
     request: Request,
@@ -578,6 +604,7 @@ def runs_list(
     ctx = base_context(request, conn)
     ctx["runs"] = db.list_runs(conn)
     ctx["worker_line"] = _worker_line(config, conn)
+    ctx["apply_queue"] = _apply_queue_view(config, conn)
     return templates.TemplateResponse(request, "runs.html", ctx)
 
 

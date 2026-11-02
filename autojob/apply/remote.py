@@ -272,7 +272,8 @@ def claim_next(conn, config: Config, worker: str = "") -> dict | None:
     pilot cap, never with submit allowed."""
     db.expire_worker_leases(conn, db.now_iso())
     pilot = active_pilot(conn)
-    queued = db.list_jobs_with_company(conn, status="queued")
+    batched = db.open_batch_job_ids(conn)
+    queued = [j for j in db.list_jobs_with_company(conn, status="queued") if j["id"] not in batched]
     if pilot is not None:
         if pilot["used"] >= pilot["cap"]:
             return None

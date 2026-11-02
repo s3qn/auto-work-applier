@@ -3,6 +3,29 @@
 {% block content %}
 <h1>Run log</h1>
 {% if worker_line %}<p class="muted">{{ worker_line }}</p>{% endif %}
+<div class="card">
+  <h2>Apply queue</h2>
+  {% if apply_queue.token_set %}
+  <p class="muted">Token set. Last pull: {{ apply_queue.last_pull }}</p>
+  {% else %}
+  <p class="muted">No token yet. Run <code>uv run python -m autojob.set_apply_token</code></p>
+  {% endif %}
+  {% if apply_queue.rows %}
+  <p class="muted">{{ apply_queue.day }}: {% for state, n in apply_queue.counts.items() %}{{ n }} {{ state }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Title</th><th>Company</th><th>Site</th><th>State</th><th>Reason</th></tr></thead>
+    <tbody>
+      {% for item in apply_queue.rows %}
+      <tr><td>{{ item.title }}</td><td>{{ item.company or "Unknown" }}</td><td>{{ item.site }}</td><td>{{ item.state }}</td><td>{{ item.reason or "-" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% elif apply_queue.token_set %}
+  <p class="empty-state">No eligible jobs for today.</p>
+  {% endif %}
+</div>
 <div class="card table-card">
   {% if runs %}
   <div class="table-scroll">

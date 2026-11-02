@@ -337,6 +337,7 @@ def _run_scan_locked(
                 )
                 applied += apply_applied
                 failed += apply_failed
+                _prebuild_apply_queue(conn, config, logger, run_id)
             else:
                 logger.log("Refresh: research and apply skipped.")
                 events.emit(conn, run_id, "system", "info", "Refresh: research and apply skipped.")
@@ -360,6 +361,23 @@ def get_pilot_cap(conn) -> int:
     return min(max(cap, 1), 100)
 
 
+def _prebuild_apply_queue(conn, config, logger, run_id: int) -> None:
+    """Build today's PC batch so the first pull is instant. Never fails the run."""
+    try:
+        from autojob import apply_token
+        from autojob.apply import queue
+
+        if not apply_token.apply_configured(config):
+            return
+        count = queue.prebuild_today(conn, config)
+        message = f"Pre-built today's apply queue: {count} job(s)." if count else "Apply queue: nothing to pre-build."
+        logger.log(message)
+        events.emit(conn, run_id, "apply", "info", message)
+    except Exception as exc:  # noqa: BLE001 - a failed pre-build must not fail the run
+        logger.log(f"Apply queue pre-build failed: {exc}")
+        events.emit(conn, run_id, "apply", "error", f"Apply queue pre-build failed: {exc}")
+
+
 def _run_apply_phase(
     conn, logger: RunLogger, *, daily_cap: int | None, auto_submit: bool, run_id: int | None = None,
     limit: int | None = None,
@@ -373,7 +391,8 @@ def _run_apply_phase(
     failed = 0
     today_start = f"{db.now_iso()[:10]}T00:00:00Z"
     sent_today_by_source: dict[str, int] = {}
-    queued_jobs = db.list_jobs_with_company(conn, status="queued")
+    batched = db.open_batch_job_ids(conn)
+    queued_jobs = [j for j in db.list_jobs_with_company(conn, status="queued") if j["id"] not in batched]
     if worker_configured(load_config()):
         # Jobs that need a logged-in browser belong to the PC worker.
         mine = [job for job in queued_jobs if not remote.is_worker_job(job, conn)]

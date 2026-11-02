@@ -308,6 +308,36 @@ on fully hands-off applying later. `pipeline/run.py`'s apply phase and
 every "Apply now" button read this same setting, so it's the single place
 that controls it.
 
+## Apply queue (PC pull)
+
+A PC Claude session pulls a daily batch and submits it from Sean's own
+Chrome, then posts results back. Auth is a separate bearer token
+(`uv run python -m autojob.set_apply_token [--rotate]`, sha256 at rest in
+`data/apply_token.json`, 0600); the worker token does not work here and this
+token does not change `worker_configured`.
+- `GET /api/apply-queue`: today's batch (`batch_id`, `day`, `size`, `jobs`,
+  `cv_version`). Created on the first pull of the Asia/Jerusalem day (the
+  08:00 full run pre-builds it when a token exists) and frozen in
+  `apply_batches`/`apply_batch_items`, so repeat pulls return identical
+  letters. Items still `open` from an older day become `expired`. Size is
+  setting `apply_queue_size` (default 20, 1..50). Jobs in an open item are
+  skipped by the server apply phase and by `claim_next`.
+- Selection: `queued`, best `fit_score` first, minus live worker leases,
+  submit-phase jobs, jobs already sent/replied/interview/rejected, reasons
+  starting `vip`, and AllJobs `/Register/` or `CreditCard.aspx` URLs.
+- `POST /api/apply-result` (`id`, `status` submitted|blocked|failed,
+  `reason`, `cover_letter_used`, `cv_version`, `timestamp`): creates a
+  `pc:<site>` application if none exists. `blocked` marks the job failed and
+  stores a VIP reason as `vip: ...` so it is never offered again. `failed`
+  bumps `jobs.pc_attempts` and requeues until it passes setting
+  `apply_queue_max_retries` (default 2). Repeats are idempotent.
+- `GET /api/cv/latest`: the newest CV PDF with `X-CV-Version`.
+- Cover letters come from the job's existing application or one sonnet call,
+  then `apply/trim.py` removes (never rewrites) sentences saying junior and
+  all but the first missing-experience sentence; `cover_letter_short` is
+  capped at 1000 characters for AllJobs. The routes are plain `def`, so
+  batch creation runs in the threadpool.
+
 ## claude CLI usage
 
 Filtering (`autojob/llm/filter.py`, haiku) and company research
