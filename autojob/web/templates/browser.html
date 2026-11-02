@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Browser - auto-job{% endblock %}
+{% block content %}
+<h1>Browser</h1>
+
+{% if flash or notice %}
+<div class="card">
+  {% if flash %}<p class="saved-indicator">{{ flash }}</p>{% endif %}
+  {% if notice %}<p class="field-hint">{{ notice }}</p>{% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Virtual display</h2>
+  <p>
+    Xvfb <span class="chip {{ 'chip-sent' if stack.xvfb else 'chip-failed' }}">{{ 'up' if stack.xvfb else 'down' }}</span>
+    x11vnc <span class="chip {{ 'chip-sent' if stack.x11vnc else 'chip-failed' }}">{{ 'up' if stack.x11vnc else 'down' }}</span>
+  </p>
+  {% for binary in missing %}
+  <p class="field-hint">{{ binary }} is not installed on the server. Install it with: <code>sudo apt-get install -y {{ binary | lower }}</code>, then press Start display.</p>
+  {% endfor %}
+  {% if not stack.all_running %}
+  <form method="post" action="/browser/start">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Start display</button>
+  </form>
+  {% endif %}
+  {% if stack.xvfb or stack.x11vnc %}
+  <form method="post" action="/browser/stop">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Stop display</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Live view</h2>
+  {% if stack.all_running %}
+  <div id="browser-screen" class="browser-screen"></div>
+  <p id="browser-status" class="field-hint">Connecting…</p>
+  <button type="button" id="browser-reconnect">Reconnect</button>
+  <script type="module">
+    import RFB from "/static/novnc/core/rfb.js";
+    const screen = document.getElementById("browser-screen");
+    const status = document.getElementById("browser-status");
+    const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/browser/ws";
+    let rfb = null;
+    function connect() {
+      status.textContent = "Connecting…";
+      rfb = new RFB(screen, url, { credentials: { password: {{ vnc_password | tojson }} } });
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+      rfb.addEventListener("connect", () => { status.textContent = "Connected."; });
+      rfb.addEventListener("disconnect", () => { status.textContent = "Disconnected. Press Reconnect."; });
+      rfb.addEventListener("securityfailure", () => { status.textContent = "VNC password rejected."; });
+    }
+    document.getElementById("browser-reconnect").addEventListener("click", () => {
+      if (rfb) { try { rfb.disconnect(); } catch (e) {} }
+      connect();
+    });
+    connect();
+  </script>
+  {% else %}
+  <p class="field-hint">Start the display to watch the browser here.</p>
+  {% endif %}
+  {% if login_site %}
+  <p class="field-hint">Login window open for {{ login_site }}. It closes itself after 10 minutes, or when you close the tab in the view.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Log in to a site</h2>
+  {% for site, label in [("linkedin", "LinkedIn"), ("alljobs", "AllJobs"), ("jobmaster", "JobMaster")] %}
+  <form method="post" action="/browser/login/{{ site }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">Log in to {{ label }}</button>
+  </form>
+  {% endfor %}
+  <p class="field-hint">Opens the site's login page in the live view for up to 10 minutes. Log in by hand; the session is saved for every later scan and apply.</p>
+</div>
+
+<div class="card">
+  <h2>Apply runs</h2>
+  <form method="post" action="/browser/settings">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="checkbox-label" for="browser_visible_mode">
+      <input type="checkbox" id="browser_visible_mode" name="browser_visible_mode" value="true" {{ 'checked' if visible_mode else '' }}>
+      Show apply runs in the live view
+    </label>
+    <p class="field-hint">When on, Apply now, Release and the scheduled apply phase open Chromium on this display instead of headless, so you can watch forms get filled. Scans stay headless. The display starts itself when needed; if it cannot, the run falls back to headless.</p>
+    <button type="submit">Save</button>
+  </form>
+</div>
+{% endblock %}

@@ -618,3 +618,12 @@ form button[type=submit] {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+.browser-screen {
+  width: 100%;
+  aspect-ratio: 1366 / 900;
+  background: #0E1111;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  overflow: hidden;
+}

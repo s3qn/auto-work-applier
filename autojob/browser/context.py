@@ -15,6 +15,7 @@ block exits.
 
 from __future__ import annotations
 
+import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -53,11 +54,27 @@ def profile_dir(config: Config) -> Path:
     return path
 
 
+def visible_launch_env(config: Config) -> dict[str, str]:
+    """The environment for launching Chromium against the Xvfb display that
+    backs the `/browser` view (see `autojob.browser.display`), so it shows up
+    there instead of on this process's own `DISPLAY` (there usually isn't
+    one). Starts from a copy of the current environment rather than
+    replacing it outright: Playwright's `env` argument, when given, is the
+    whole environment the browser process sees, and dropping `PATH` and
+    everything else would break the browser launch itself."""
+    from autojob.browser.display import load_display_config
+
+    env = dict(os.environ)
+    env["DISPLAY"] = load_display_config(config).display
+    return env
+
+
 @contextmanager
 def browser_page(
     config: Config,
     *,
     headless: bool = True,
+    visible: bool = False,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT_S,
 ) -> Iterator["Page"]:  # noqa: F821 - Playwright type, imported lazily below
     """Yield a `Page` from the persistent Chromium profile.
@@ -65,6 +82,14 @@ def browser_page(
     Acquires the process-wide browser lock first (raising `BrowserBusyError`
     if it cannot within `lock_timeout` seconds), launches a persistent
     context against `data/chrome-profile/`, and closes it again on exit.
+
+    `visible=True` overrides `headless` to `False` and points Chromium at the
+    shared Xvfb display managed by `autojob.browser.display`, so the window
+    can be watched and interacted with through the `/browser` page's noVNC
+    view (or any VNC client, on the box itself). This is how the one-time
+    login helper (`autojob.browser.login`) and the apply pipeline's optional
+    "watch it fill forms" mode both work. Unattended scans and applies keep
+    the default, `headless=True`, `visible=False`.
     """
     if not _BROWSER_LOCK.acquire(timeout=lock_timeout):
         raise BrowserBusyError(
@@ -74,11 +99,26 @@ def browser_page(
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                str(profile_dir(config)),
-                headless=headless,
+            launch_kwargs: dict = dict(
+                headless=False if visible else headless,
                 user_agent=USER_AGENT,
-                viewport=VIEWPORT,
+            )
+            if visible:
+                # No fixed viewport, so the page tracks the window size and
+                # fills the whole Xvfb screen in the noVNC view.
+                launch_kwargs["no_viewport"] = True
+                launch_kwargs["env"] = visible_launch_env(config)
+                from autojob.browser.display import load_display_config
+
+                width, height = load_display_config(config).geometry.split("x")[:2]
+                launch_kwargs["args"] = [
+                    "--window-position=0,0",
+                    f"--window-size={width},{height}",
+                ]
+            else:
+                launch_kwargs["viewport"] = VIEWPORT
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir(config)), **launch_kwargs
             )
             context.set_default_timeout(DEFAULT_TIMEOUT_MS)
             context.set_default_navigation_timeout(NAV_TIMEOUT_MS)

@@ -1,0 +1,1 @@
+noVNC 1.6.0 core + pako vendored from https://github.com/novnc/noVNC/releases/tag/v1.6.0 (MPL-2.0). Only core/ (RFB client, no server/app UI) and vendor/pako (zlib decompression) are included; see LICENSE.txt.

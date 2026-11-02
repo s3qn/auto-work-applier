@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from starlette.responses import FileResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from starlette.templating import Jinja2Templates
 
 from autojob import auth, db
+from autojob.browser import display, login
+from autojob.browser.context import _BROWSER_LOCK, LOGIN_URLS
 from autojob.apply import mailer
 from autojob.config import Config
 from autojob.pipeline import events
@@ -23,6 +27,7 @@ from autojob.pipeline.research import research_pending
 from autojob.web.deps import (
     base_context,
     get_auto_submit,
+    get_browser_visible_mode,
     get_config,
     get_db,
     get_email_daily_cap,
@@ -756,6 +761,200 @@ def run_refresh(request: Request, csrf_token: str = Form(...), config: Config = 
     thread = threading.Thread(target=_run_scan_and_release, args=(lock, "refresh"), daemon=True)
     thread.start()
     return RedirectResponse("/jobs?refresh=started", status_code=303)
+
+
+# --- browser view ---------------------------------------------------------
+
+BROWSER_FLASH = {
+    "saved": ("1", "Saved."),
+    "login": ("started", "Login window opening in the view below."),
+    "busy": ("1", "The browser is in use (a login window, an apply or a run is in progress)."),
+}
+
+
+_LOGIN_START_LOCK = threading.Lock()
+
+
+def _login_alive(app) -> bool:
+    thread = app.state.login_thread
+    return thread is not None and thread.is_alive()
+
+
+@router.get("/browser")
+def browser_get(
+    request: Request,
+    conn=Depends(get_db),
+    config: Config = Depends(get_config),
+    templates: Jinja2Templates = Depends(get_templates),
+):
+    app = request.app
+    ctx = base_context(request, conn)
+    stack = display.status(config)
+    ctx["stack"] = stack
+    ctx["missing"] = display.missing_binaries()
+    ctx["visible_mode"] = get_browser_visible_mode(conn)
+    ctx["vnc_password"] = (
+        display.ensure_vnc_password(display.load_display_config(config)) if stack["all_running"] else None
+    )
+    ctx["login_site"] = app.state.login_site if _login_alive(app) else None
+    ctx["notice"] = app.state.browser_notice
+    app.state.browser_notice = None
+    flash = ""
+    for key, (value, text) in BROWSER_FLASH.items():
+        if request.query_params.get(key) == value:
+            flash = text
+    ctx["flash"] = flash
+    return templates.TemplateResponse(request, "browser.html", ctx)
+
+
+@router.post("/browser/start")
+def browser_start(request: Request, csrf_token: str = Form(...), config: Config = Depends(get_config)):
+    verify_csrf_or_403(request, csrf_token)
+    try:
+        display.start_all(config)
+    except display.DisplayStackError as exc:
+        request.app.state.browser_notice = str(exc)
+    return RedirectResponse("/browser", status_code=303)
+
+
+@router.post("/browser/stop")
+def browser_stop(request: Request, csrf_token: str = Form(...), config: Config = Depends(get_config)):
+    verify_csrf_or_403(request, csrf_token)
+    with _LOGIN_START_LOCK:
+        if _login_alive(request.app) or _BROWSER_LOCK.locked() or runlock.run_active(config):
+            return RedirectResponse("/browser?busy=1", status_code=303)
+        display.stop_all(config)
+    return RedirectResponse("/browser", status_code=303)
+
+
+@router.post("/browser/settings")
+def browser_settings(
+    request: Request,
+    browser_visible_mode: bool = Form(False),
+    csrf_token: str = Form(...),
+    conn=Depends(get_db),
+):
+    verify_csrf_or_403(request, csrf_token)
+    db.set_setting(conn, "browser_visible_mode", browser_visible_mode)
+    return RedirectResponse("/browser?saved=1", status_code=303)
+
+
+def _run_login_session_in_background(app, config: Config, site: str) -> None:
+    # The run lock, not just _BROWSER_LOCK: the scheduled run is a separate
+    # process and would otherwise open the same Chromium profile.
+    try:
+        with runlock.hold_run_lock(config):
+            login.run_login_session(config, site)
+    except runlock.RunInProgress:
+        app.state.browser_notice = "A run is in progress; try the login after it finishes."
+    except Exception as exc:  # noqa: BLE001
+        app.state.browser_notice = f"Login window failed: {exc}"
+
+
+@router.post("/browser/login/{site}")
+def browser_login(
+    site: str,
+    request: Request,
+    csrf_token: str = Form(...),
+    config: Config = Depends(get_config),
+):
+    verify_csrf_or_403(request, csrf_token)
+    if site not in LOGIN_URLS:
+        raise HTTPException(status_code=404)
+    app = request.app
+    with _LOGIN_START_LOCK:
+        if _login_alive(app) or runlock.run_active(config):
+            return RedirectResponse("/browser?busy=1", status_code=303)
+        try:
+            display.start_all(config)
+        except display.DisplayStackError as exc:
+            app.state.browser_notice = str(exc)
+            return RedirectResponse("/browser", status_code=303)
+        thread = threading.Thread(
+            target=_run_login_session_in_background, args=(app, config, site), daemon=True
+        )
+        app.state.login_site = site
+        app.state.login_thread = thread
+        thread.start()
+    return RedirectResponse("/browser?login=started", status_code=303)
+
+
+DEFAULT_PUBLIC_HOST = "autojob.sean.build"
+
+
+def _public_hosts() -> set[str]:
+    """Hosts the dashboard is served under publicly, from the comma-separated
+    `AUTOJOB_PUBLIC_HOST` (default `autojob.sean.build`)."""
+    raw = os.environ.get("AUTOJOB_PUBLIC_HOST", DEFAULT_PUBLIC_HOST)
+    return {host.strip().lower() for host in raw.split(",") if host.strip()}
+
+
+def _ws_origin_allowed(websocket: WebSocket) -> bool:
+    """Cross-site WebSocket hijacking guard. Browsers always send Origin on a
+    WebSocket upgrade, so a missing one is rejected along with a foreign one.
+    Allowed: an Origin whose host matches the request's Host header (what
+    cloudflared forwards unchanged for the tunnel), or one of the configured
+    public hosts, in case a proxy in front rewrites Host."""
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return False
+    origin_host = (urlparse(origin).netloc or "").lower()
+    if not origin_host:
+        return False
+    if origin_host == websocket.headers.get("host", "").lower():
+        return True
+    return origin_host in _public_hosts()
+
+
+async def _open_vnc_connection(host: str, port: int):
+    return await asyncio.open_connection(host, port)
+
+
+@router.websocket("/browser/ws")
+async def browser_ws(websocket: WebSocket):
+    # RequireLoginMiddleware never sees websocket scopes, so check here.
+    if not websocket.session.get("logged_in"):
+        await websocket.close(code=1008)
+        return
+    if not _ws_origin_allowed(websocket):
+        await websocket.close(code=1008)
+        return
+    port = display.load_display_config(websocket.app.state.config).x11vnc_port
+    try:
+        reader, writer = await _open_vnc_connection("127.0.0.1", port)
+    except OSError:
+        await websocket.close(code=1011)
+        return
+    await websocket.accept()
+
+    async def ws_to_tcp():
+        try:
+            while True:
+                data = await websocket.receive_bytes()
+                writer.write(data)
+                await writer.drain()
+        except WebSocketDisconnect:
+            pass
+
+    async def tcp_to_ws():
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            await websocket.send_bytes(data)
+
+    tasks = [asyncio.ensure_future(ws_to_tcp()), asyncio.ensure_future(tcp_to_ws())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        writer.close()
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # --- profile and CV -------------------------------------------------------

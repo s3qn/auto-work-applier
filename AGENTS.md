@@ -75,11 +75,24 @@ sync API isn't safe to share across threads against the same profile.
 `autojob/browser/login.py` (`uv run python -m autojob.browser.login <site>`
 for `linkedin`, `alljobs`, or `jobmaster`) opens that site's login page
 headed, on the same persistent profile, so Sean logs in once by hand and
-every later headless run reuses the cookies. This machine has no display by
-default: with no `DISPLAY` set, the helper re-launches itself under
-`xvfb-run` (a virtual framebuffer) so Chromium still runs headed as far as
-Playwright is concerned. If `xvfb-run` isn't installed it prints
-`sudo apt-get install -y xvfb` instead of failing silently.
+every later headless run reuses the cookies. This machine has no display,
+so the helper starts the managed display (`autojob.browser.display`, `uv run
+python -m autojob.browser.display <start|stop|status>`) and Sean logs in
+through the live view at `/browser`. A missing binary prints an `apt-get`
+hint instead of failing silently.
+
+`/browser` (dashboard page) shows that display: Xvfb with `-nolisten tcp`,
+and x11vnc with `-localhost` on port 5999 using a 0600 password under
+`data/vnc/` (read through `-passwdfile`, never passed on a command line).
+`/browser/ws` relays bytes from a WebSocket to x11vnc, and checks the
+session cookie and the Origin header on the upgrade: the Origin must be
+present and its host must equal the request's Host (cloudflared forwards
+`autojob.sean.build` unchanged) or be listed in `AUTOJOB_PUBLIC_HOST`
+(comma-separated, default `autojob.sean.build`). noVNC is
+vendored under `autojob/web/static/novnc/` and never loaded from a CDN. The
+page also has the login buttons and the `browser_visible_mode` setting: when
+on, apply runs open Chromium on this display instead of headless, and fall
+back to headless if the display cannot start.
 
 ## Apply pipeline
 
@@ -297,7 +310,11 @@ scan" is computed from it (`describe_next_run`); there is no Targets field.
 timer and the dashboard. `run_scan` holds it for the whole run and raises
 `RunInProgress` otherwise; the kernel frees it if a process dies. Run, Refresh,
 Release and Research buttons check `run_active(config)`. A scheduled run that
-finds the lock held exits 0.
+finds the lock held exits 0. A login session (the `/browser` "Open login"
+buttons and the `autojob.browser.login` CLI) holds the same lock for its whole
+length, since it opens the same Chromium profile: a login is refused while a
+run is active, and a run started during a login finds the lock held. The
+`/browser` page's Stop button is refused while the lock is held too.
 
 `run_scan(mode=)` is `full` (scan, filter, research, apply) or `refresh` (scan
 and filter only, the Jobs page "Refresh jobs" button, stored in `runs.mode`).

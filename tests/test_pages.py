@@ -11,7 +11,7 @@ from tests.conftest import get_csrf_token, login
 
 def test_all_pages_render_when_empty(client, with_password):
     login(client, with_password)
-    for path in ["/", "/jobs", "/needs-help", "/submit", "/targets", "/runs", "/profile"]:
+    for path in ["/", "/jobs", "/needs-help", "/submit", "/targets", "/runs", "/profile", "/browser"]:
         response = client.get(path)
         assert response.status_code == 200, f"{path} returned {response.status_code}"
 

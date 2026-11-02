@@ -43,6 +43,9 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.state.config = config
     app.state.login_limiter = auth.LoginLimiter()
     app.state.run_lock = threading.Lock()
+    app.state.browser_notice = None
+    app.state.login_thread = None
+    app.state.login_site = None
     app.state.templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")

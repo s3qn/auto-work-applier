@@ -33,7 +33,7 @@ class FakePage:
 
 def _fake_browser_page_factory(page):
     @contextmanager
-    def _fake_browser_page(config, headless=True):
+    def _fake_browser_page(config, headless=True, visible=False):
         yield page
 
     return _fake_browser_page
@@ -213,7 +213,7 @@ def test_apply_to_job_browser_busy_requeues_the_job(config, monkeypatch):
     job = _seed_job(config)
 
     @contextmanager
-    def raising_browser_page(config, headless=True):
+    def raising_browser_page(config, headless=True, visible=False):
         raise BrowserBusyError("Another browser session is already running. Try again shortly.")
         yield  # pragma: no cover - unreachable, keeps this a generator
 
@@ -533,7 +533,7 @@ def test_release_email_application_sends_resolves_help_item_no_browser(config, m
 
     monkeypatch.setattr(apply_module.mailer, "send_draft", fake_send_draft)
 
-    def exploding_browser_page(config, headless=True):
+    def exploding_browser_page(config, headless=True, visible=False):
         raise AssertionError("release of an email application must not open a browser")
 
     monkeypatch.setattr(apply_module, "browser_page", exploding_browser_page)
@@ -708,3 +708,93 @@ def test_handler_cannot_find_form_or_submit_button_falls_through():
         "Could not find the Greenhouse submit button.",
     ):
         assert apply_module._should_fall_through({"status": "needs_help", "reason": reason}, is_last=False)
+
+
+# --- visible mode ------------------------------------------------------------
+
+def _recording_browser_page(page, seen):
+    @contextmanager
+    def _bp(config, headless=True, visible=False):
+        seen.append({"headless": headless, "visible": visible})
+        yield page
+
+    return _bp
+
+
+def _set_visible(config, value=True):
+    conn = db.get_connection(config)
+    try:
+        db.set_setting(conn, "browser_visible_mode", value)
+    finally:
+        conn.close()
+
+
+def test_visible_mode_starts_display_and_opens_visible_browser(config, monkeypatch):
+    job = _seed_job(config)
+    _set_visible(config)
+    seen = []
+    monkeypatch.setattr(apply_module, "browser_page", _recording_browser_page(FakePage(), seen))
+    monkeypatch.setattr(apply_module.display, "start_all", lambda cfg: {"all_running": True})
+    handler, _ = _fake_handler({"status": "ready_to_submit", "reason": None})
+    monkeypatch.setattr(apply_module, "pick_handler", lambda url, page: handler)
+    _patch_claude(monkeypatch)
+
+    result = apply_module.apply_to_job(job, auto_submit=False)
+
+    assert result["status"] == "ready_to_submit"
+    assert seen == [{"headless": False, "visible": True}]
+
+
+def test_visible_mode_falls_back_to_headless_when_display_fails(config, monkeypatch):
+    job = _seed_job(config)
+    _set_visible(config)
+    conn = db.get_connection(config)
+    try:
+        run_id = db.create_run(conn, trigger="manual")
+    finally:
+        conn.close()
+    seen = []
+    monkeypatch.setattr(apply_module, "browser_page", _recording_browser_page(FakePage(), seen))
+
+    def boom(cfg):
+        raise apply_module.display.DisplayStackError("x11vnc is not installed")
+
+    monkeypatch.setattr(apply_module.display, "start_all", boom)
+    handler, _ = _fake_handler({"status": "ready_to_submit", "reason": None})
+    monkeypatch.setattr(apply_module, "pick_handler", lambda url, page: handler)
+    _patch_claude(monkeypatch)
+
+    result = apply_module.apply_to_job(job, auto_submit=False, run_id=run_id)
+
+    assert result["status"] == "ready_to_submit"
+    assert seen == [{"headless": True, "visible": False}]
+    conn = db.get_connection(config)
+    try:
+        rows = conn.execute(
+            "SELECT message FROM run_events WHERE run_id = ? AND phase = 'apply' AND kind = 'error'",
+            (run_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert any("headless" in r["message"] for r in rows)
+
+
+def test_visible_mode_off_never_starts_display(config, monkeypatch):
+    job = _seed_job(config)
+    seen = []
+    monkeypatch.setattr(apply_module, "browser_page", _recording_browser_page(FakePage(), seen))
+
+    def never(cfg):
+        raise AssertionError("display must not start when visible mode is off")
+
+    monkeypatch.setattr(apply_module.display, "start_all", never)
+    handler, _ = _fake_handler({"status": "ready_to_submit", "reason": None})
+    monkeypatch.setattr(apply_module, "pick_handler", lambda url, page: handler)
+    _patch_claude(monkeypatch)
+
+    result = apply_module.apply_to_job(job, auto_submit=False)
+    assert seen == [{"headless": True, "visible": False}]
+
+    release = apply_module.release_application(result["application_id"])
+    assert release is not None
+    assert seen[-1] == {"headless": True, "visible": False}

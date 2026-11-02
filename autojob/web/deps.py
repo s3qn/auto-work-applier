@@ -125,6 +125,14 @@ def get_email_daily_cap(conn: sqlite3.Connection) -> int:
         return 15
 
 
+def get_browser_visible_mode(conn: sqlite3.Connection) -> bool:
+    """When on, apply runs (scans still run headless) open on the same Xvfb
+    display the /browser page watches, instead of headless, so Sean can
+    watch a form get filled live. Off by default: unattended applying stays
+    headless."""
+    return bool(db.get_setting(conn, "browser_visible_mode", False))
+
+
 def next_scan_display(conn: sqlite3.Connection) -> str:
     return schedule.describe_next_run()
 
@@ -142,6 +150,8 @@ def active_section(path: str) -> str:
         return "targets"
     if path.startswith("/runs"):
         return "runs"
+    if path.startswith("/browser"):
+        return "browser"
     if path.startswith("/profile"):
         return "profile"
     return ""

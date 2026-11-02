@@ -44,11 +44,18 @@ from autojob.apply import answers as answers_module
 from autojob.apply import mailer
 from autojob.apply import proof
 from autojob.apply.router import pick_handler, pick_handler_by_url
+from autojob.browser import display
 from autojob.browser.context import BrowserBusyError, browser_page
 from autojob.config import load_config
 from autojob.llm.cv import latest_cv_pdf
 from autojob.pipeline import events
-from autojob.web.deps import JERUSALEM, get_answer_bank, get_email_daily_cap, get_profile_answers
+from autojob.web.deps import (
+    JERUSALEM,
+    get_answer_bank,
+    get_browser_visible_mode,
+    get_email_daily_cap,
+    get_profile_answers,
+)
 
 CHANNEL_BY_HANDLER_NAME = {"greenhouse": "greenhouse", "lever": "lever", "comeet": "comeet"}
 STALE_NO_HANDLER_REASON_MARKER = "No apply handler recognizes this ATS"
@@ -174,6 +181,24 @@ def _should_fall_through(result: dict, is_last: bool) -> bool:
     return any(marker in reason for marker in FALL_THROUGH_MARKERS)
 
 
+def _visible_mode(conn, config, run_id) -> bool:
+    """True when the apply should run on the watchable display. Starts the
+    display stack itself; if it cannot start, falls back to headless (and
+    says so in the run log) instead of failing the apply."""
+    if not get_browser_visible_mode(conn):
+        return False
+    try:
+        display.start_all(config)
+    except Exception as exc:  # noqa: BLE001 - any display failure falls back to headless
+        if run_id is not None:
+            events.emit(
+                conn, run_id, "apply", "error",
+                f"Browser view unavailable ({exc}); running headless",
+            )
+        return False
+    return True
+
+
 def apply_to_job(job, *, auto_submit: bool, run_id: int | None = None) -> dict:
     """Apply to one job. `job` is a row from `db.get_job_with_company` (or
     anything with the same keys). Returns {"status", "application_id",
@@ -218,7 +243,8 @@ def apply_to_job(job, *, auto_submit: bool, run_id: int | None = None) -> dict:
 
             cv_path = latest_cv_pdf(config)
             plan = plan_channels(job, conn)
-            with browser_page(config, headless=True) as page:
+            visible_mode = _visible_mode(conn, config, run_id)
+            with browser_page(config, headless=not visible_mode, visible=visible_mode) as page:
                 first_kind, first_target = plan[0]
                 placeholder_channel = (
                     f"email:{first_target.split('@', 1)[-1].lower()}" if first_kind == "email" else "other"
@@ -429,8 +455,9 @@ def release_application(application_id: int) -> dict:
                 return {"status": "failed", "reason": reason}
 
         apply_url = application["apply_url"] or job["url"]
+        visible_mode = _visible_mode(conn, config, None)
         try:
-            with browser_page(config, headless=True) as page:
+            with browser_page(config, headless=not visible_mode, visible=visible_mode) as page:
                 page.goto(apply_url, wait_until="domcontentloaded")
                 handler = pick_handler(apply_url, page)
 

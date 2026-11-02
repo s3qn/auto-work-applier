@@ -536,7 +536,7 @@ def test_apply_to_job_via_generic_escalates_one_help_item_but_still_screenshots(
     page = FakeOrchestratorPage(form_page)
 
     @contextmanager
-    def fake_browser_page(cfg, headless=True):
+    def fake_browser_page(cfg, headless=True, visible=False):
         yield page
 
     monkeypatch.setattr(apply_module, "browser_page", fake_browser_page)
@@ -585,7 +585,7 @@ def test_apply_to_job_via_generic_holds_as_ready_to_submit_and_never_submits(mon
     page = FakeOrchestratorPage(form_page)
 
     @contextmanager
-    def fake_browser_page(cfg, headless=True):
+    def fake_browser_page(cfg, headless=True, visible=False):
         yield page
 
     monkeypatch.setattr(apply_module, "browser_page", fake_browser_page)
